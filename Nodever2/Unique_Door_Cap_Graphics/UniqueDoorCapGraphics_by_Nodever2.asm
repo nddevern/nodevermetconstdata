@@ -1955,29 +1955,29 @@ print "gfx to dma: ", pc
 ; f4 is fully closed
 ; f1 is almost fully open
 ; wht is white door gfx
-GRYDoorDMAGfxf4:  incbin ../bin/FullDoorCapRewriteGfx/placeholder.gfx
-GRYDoorDMAGfxf3:  incbin ../bin/FullDoorCapRewriteGfx/placeholder.gfx
-GRYDoorDMAGfxf2:  incbin ../bin/FullDoorCapRewriteGfx/placeholder.gfx
-GRYDoorDMAGfxf1:  incbin ../bin/FullDoorCapRewriteGfx/placeholder.gfx
-GRYDoorDMAGfxwht: incbin ../bin/FullDoorCapRewriteGfx/placeholder.gfx
+GRYDoorDMAGfxf4:  incbin ./bin/placeholder.gfx
+GRYDoorDMAGfxf3:  incbin ./bin/placeholder.gfx
+GRYDoorDMAGfxf2:  incbin ./bin/placeholder.gfx
+GRYDoorDMAGfxf1:  incbin ./bin/placeholder.gfx
+GRYDoorDMAGfxwht: incbin ./bin/placeholder.gfx
 
-YLWDoorDMAGfxf4:  incbin ../bin/FullDoorCapRewriteGfx/ylwf4.gfx
-YLWDoorDMAGfxf3:  incbin ../bin/FullDoorCapRewriteGfx/ylwf3.gfx
-YLWDoorDMAGfxf2:  incbin ../bin/FullDoorCapRewriteGfx/ylwf2.gfx
-YLWDoorDMAGfxf1:  incbin ../bin/FullDoorCapRewriteGfx/ylwf1.gfx
-YLWDoorDMAGfxwht: incbin ../bin/FullDoorCapRewriteGfx/ylwwht.gfx
+YLWDoorDMAGfxf4:  incbin ./bin/ylwf4.gfx
+YLWDoorDMAGfxf3:  incbin ./bin/ylwf3.gfx
+YLWDoorDMAGfxf2:  incbin ./bin/ylwf2.gfx
+YLWDoorDMAGfxf1:  incbin ./bin/ylwf1.gfx
+YLWDoorDMAGfxwht: incbin ./bin/ylwwht.gfx
 
-GRNDoorDMAGfxf4:  incbin ../bin/FullDoorCapRewriteGfx/grnf4.gfx
-GRNDoorDMAGfxf3:  incbin ../bin/FullDoorCapRewriteGfx/grnf3.gfx
-GRNDoorDMAGfxf2:  incbin ../bin/FullDoorCapRewriteGfx/grnf2.gfx
-GRNDoorDMAGfxf1:  incbin ../bin/FullDoorCapRewriteGfx/grnf1.gfx
-GRNDoorDMAGfxwht: incbin ../bin/FullDoorCapRewriteGfx/grnwht.gfx
+GRNDoorDMAGfxf4:  incbin ./bin/grnf4.gfx
+GRNDoorDMAGfxf3:  incbin ./bin/grnf3.gfx
+GRNDoorDMAGfxf2:  incbin ./bin/grnf2.gfx
+GRNDoorDMAGfxf1:  incbin ./bin/grnf1.gfx
+GRNDoorDMAGfxwht: incbin ./bin/grnwht.gfx
 
-REDDoorDMAGfxf4:  incbin ../bin/FullDoorCapRewriteGfx/redf4.gfx
-REDDoorDMAGfxf3:  incbin ../bin/FullDoorCapRewriteGfx/redf3.gfx
-REDDoorDMAGfxf2:  incbin ../bin/FullDoorCapRewriteGfx/redf2.gfx
-REDDoorDMAGfxf1:  incbin ../bin/FullDoorCapRewriteGfx/redf1.gfx
-REDDoorDMAGfxwht: incbin ../bin/FullDoorCapRewriteGfx/redwht.gfx
+REDDoorDMAGfxf4:  incbin ./bin/redf4.gfx
+REDDoorDMAGfxf3:  incbin ./bin/redf3.gfx
+REDDoorDMAGfxf2:  incbin ./bin/redf2.gfx
+REDDoorDMAGfxf1:  incbin ./bin/redf1.gfx
+REDDoorDMAGfxwht: incbin ./bin/redwht.gfx
 
 print "END OF GFX IN $DF: ", pc
 warnpc $DFFFFF

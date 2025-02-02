@@ -1,0 +1,2 @@
+call ApplyCode.bat
+@pause

@@ -1,0 +1,19 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build and Run",
+            "type": "shell",
+            // Assign output file name with VSCode inner variables like ${fileBasename}
+            "command": "Start-Process -filepath '.\\ApplyCodeAndTest.bat' -NoNewWindow",
+            "options": {
+                "cwd": "${workspaceFolder}/a_testing"
+            },
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

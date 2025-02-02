@@ -1,0 +1,4 @@
+*.smc
+*.cpu.sym
+*.smp.sym
+*.srm
