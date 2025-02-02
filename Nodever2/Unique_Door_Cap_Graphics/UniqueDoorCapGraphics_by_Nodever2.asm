@@ -540,13 +540,12 @@ lorom
 		;    CLR: The color of the door. Valid options are YLW, RED, GRN.
 macro ColoredDoorSetup(CLR)
 {
+	; NOTE/TODO: WE SHOULD NOT BE LOADING <CLR>HDOORTILE HERE, IT SHOULD JUST BE A BASE INDEX OF 0 OR 10 DEPENDING ON H OR V.
 	Door<CLR>InvertedHSetup:
-        print "inverted<CLR>Hsetup: ", pc ; NOTE/TODO: WE SHOULD NOT BE LOADING <CLR>HDOORTILE HERE, IT SHOULD JUST BE A BASE INDEX OF 0 OR 10 DEPENDING ON H OR V.
 		LDA #$0000 : JSR SetDoorTile_InvertedH      ; set H flipped door tile
         BRA ?finishclrHsetup
         
 	Door<CLR>NormalHSetup:
-		print "<CLR>Hsetup: ", pc
         LDA #$0000 : JSR SetDoorTile_H              ; set door tile
 	
     ?finishclrHsetup:
@@ -566,7 +565,6 @@ macro ColoredDoorSetup(CLR)
 		LDA #DoorCLRVHit : STA !RAMPLMLinkInstrs,x            ; set door link instruction
 		
 	?mainclrsetup:
-        print "?main<CLR>setup TODO MAKE SURE THIS WRITES THE CORRECT VALUE: ", pc
 		LDA #!<CLR>HP|!DoorSpeedsTable<CLR>Index|!DMAPalette<CLR>
         STA !RAMPLMVars2,x  ; set door speeds table index, door HP, DMA pal.
 		LDA #!GotoLinkIfShot<CLR> : STA !RAMPLMPreInsts,x     ; set door pre-instruction
@@ -590,7 +588,6 @@ macro ColoredDoorInstList(O)
 		
 	; Instruction List - main, includes door opening animation
 	DoorCLR<O>Main:
-        print "doorCLR<O>Main: ", pc
         dw InstDMADoor<O> : db !DMAf4, !EndAnimSpIndex ; instant.
         dw InstDrawDoor<O>    : db !DoorCLR<O>Frame4Offset, !TTshotbyte|!EndAnimSpIndex
         dw InstDrawDoor<O>    : db !DoorCLR<O>Frame4Offset, !TTshotbyte|!EndAnimSpIndex ; draw it again, thanks JAM for the "Vertical doors after elevator" fix https://forum.metroidconstruction.com/index.php/topic,145.msg4812.html#msg4812
@@ -630,7 +627,6 @@ endmacro
 		;    I: Whether or not the door is inverted (i.e. flipped). Valid options are Normal, Inverted.
 macro ColorDoorPLMEntry(CLR, O, I)
 {
-	print "PLM Entry - <CLR> door facing <O> at ", pc
 	dw Door<CLR><I><O>Setup, DoorCLR<O>Main, DoorCLR<O>Close
 }
 endmacro
@@ -746,7 +742,6 @@ endmacro
 		;    I: Whether or not the door is inverted (i.e. flipped). Valid options are Normal, Inverted.
 macro GreyDoorPLMEntry(O, I)
 {
-	print "PLM Entry - GRY door facing <O> at ", pc
 	dw DoorGRY<I><O>Setup, DoorGRY<O>Main, DoorGRY<O>Close
 }
 endmacro
@@ -837,7 +832,6 @@ endmacro
 		;    O: The orientation of the door. Valid options are H, V.
 macro BlueDoorPLMEntry(O)
 {
-	print "PLM Entry - closed BLU door facing <O> at ", pc
 	DoorBLU<O>ClosedPLMEntry:
 	dw DoorBLU<O>ClosedSetup, DoorBLU<O>Main, DoorBLU<O>Close
 }
@@ -856,7 +850,6 @@ endmacro
 		;    O: The orientation of the door. Valid options are H, V.
 macro ClosingBlueDoorPLMEntry(O)
 {
-	print "PLM Entry - Closing BLU door facing <O> at ", pc
 	DoorBLU<O>ClosingPLMEntry:
 	dw DoorBLU<O>ClosingSetup, DoorBLU<O>Close
 }
@@ -1031,11 +1024,8 @@ endmacro
 		;    D: The direction of the door. Valid options are L, R.
 macro EyeDoorPLMEntry(D)
 {
-	print "PLM Entry - EYE door eye facing <D> at ", pc
 	dw DoorEYE<D>SetupEye,  EyeDoorEye<D>Main						;eye door eye
-	print "PLM Entry - EYE door top facing <D> at ", pc
 	dw DoorEYESetupEdge, EyeDoorTop<D>Main, EyeDoorTop<D>Main	;eye door top edge
-	print "PLM Entry - EYE door btm facing <D> at ", pc
 	dw DoorEYESetupEdge, EyeDoorBtm<D>Main						;eye door bottom edge
 }
 endmacro
@@ -1220,7 +1210,6 @@ endmacro
 
     {
         InstDMADoorH: 
-        print "InstDMADoorH: ", pc
         ; get source address for H door graphics
         ; remember, high byte of !RAMPLMVars2,x is index into DoorSpeedsTables to use for this door color; we can use that same index into a table of door animation frame tables.
         
@@ -1247,7 +1236,6 @@ endmacro
         ; TODO convert these addresses into labels
         
         
-        print "InstDMADoor: ", pc
         PHY : LDY $0330
         ; for $D0,x table:
         ;  Size is 2 bytes
@@ -1359,9 +1347,7 @@ endmacro
 
         
     }
-	print "beginning of newly free space at old door draw instructions: ", pc
 	warnpc $84AA98
-	print "end       of newly free space at old door draw instructions: 84aa97"
 	
 }
 
@@ -1383,12 +1369,8 @@ endmacro
 			dw InstDrawDoorH : db !DoorGRYHFrame3Offset, !TTsolidbyte|!TorizoClosSpeedIndex ;/
 			dw !InstGoto, DoorGRYHMain
 		
-		print "beginning of newly free space at torizo door closing instruction list: ", pc
 		warnpc $84BA70
-		print "end       of newly free space at torizo door closing instruction list: 84ba6f"
 		
-		print "beginning of newly free space at torizo door main instruction list (this patch writes nothing here): 84ba7f"
-		print "end       of newly free space at torizo door main instruction list (this patch writes nothing here): 84baf4"
 	}
 	
 	;=====EYE DOORS=====
@@ -1396,9 +1378,7 @@ endmacro
 		org !EyeDoorInstListLoc
 			%EyeDoorInstList(L)
 			%EyeDoorInstList(R)
-		print "beginning of newly free space at eye door instruction lists: ", pc
 		warnpc $84DA8D
-		print "end       of newly free space at eye door instruction lists: 84da8c"
 	}
 	
 	; WRITE ALL NEW INSTRUCTION LISTS AND DATA STARTING HERE
@@ -1472,7 +1452,6 @@ endmacro
 		; !RAMDPCustomPLMDrawInstructionLocation+$0A;terminator for draw instruction
 		; !RAMDPCustomPLMDrawInstructionLocation+$0C;unused
 	InstDrawDoorH:
-        print "instdrawdoorH: ", pc
 		LDA #!HDoorTileDist : STA !RAMDPCustomPLMDrawInstructionLocation+$0A ; used by below routine. Offset in CRE TTB to add.
 		LDA #$0800          : STA !RAMDPCustomPLMDrawInstructionLocation+$0C ; used by below routine. Flip mask.
 		LDA #$8004          : STA !RAMDPCustomPLMDrawInstructionLocation+$00 ; draw inst # of tiles to draw
@@ -1660,7 +1639,6 @@ endmacro
     
 	; Instruction: Decrement door HP; if door HP <= 0, clear PLM pre-instruction, set PLM room argument door, and goto [[Y]]
 	; Replaces $848A91
-    print "InstNewDoorHit TODO TEST: ", pc
 	InstNewDoorHit:
 	{
 		SEP #$20
@@ -1756,7 +1734,6 @@ endmacro
 	}
 	
 	; Function: Deal [A] extra damage to a door PLM with ID [X] during door hit
-    print "DealExtraDoorDamage TODO TEST: ", pc
 	DealExtraDoorDamage:
 	{
 		PHP : SEP #$20 : PHA
@@ -1781,13 +1758,11 @@ endmacro
 	
     ; Function: Set door tile !RAMPLMVars,y to [A], and adjust for door graphics index
     {
-    print "SetDoorTile: ", pc
     SetDoorTile:
     .InvertedH
         ORA #$0400                     ; x flip
         
     .H
-    print "SetDoorTile_H: ", pc
         JSR .getDMAGraphicsSlotIndex : LSR #4 
         BRA .finish
         
@@ -1842,9 +1817,7 @@ endmacro
 	
 }
 
-print "beginning of newly free space at door instruction lists: ", pc
 warnpc $84C54E
-print "end       of newly free space at door instruction lists: 84c54d"
 
 ;====================PLM ENTRIES======================
 {
@@ -1857,7 +1830,6 @@ org !PLMEntriesLoc
 	%AllClosingBlueDoorPLMEntries()
 	
 org !TorizoPLMEntryLoc
-	print "PLM Entry - Torizo door facing H at ", pc
 	dw DoorGRYInvertedHSetup, DoorGRYHMain, TorizoDoorClose
 	
 org !EyeDoorPLMEntriesLoc
@@ -1951,7 +1923,6 @@ org !EyeDoorPLMEntriesLoc
 }
 
 org $DF8000
-print "gfx to dma: ", pc
 ; f4 is fully closed
 ; f1 is almost fully open
 ; wht is white door gfx
@@ -1979,7 +1950,6 @@ REDDoorDMAGfxf2:  incbin ./bin/redf2.gfx
 REDDoorDMAGfxf1:  incbin ./bin/redf1.gfx
 REDDoorDMAGfxwht: incbin ./bin/redwht.gfx
 
-print "END OF GFX IN $DF: ", pc
 warnpc $DFFFFF
 
 
