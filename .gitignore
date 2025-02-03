@@ -2,3 +2,4 @@
 *.cpu.sym
 *.smp.sym
 *.srm
+*.smc.bin

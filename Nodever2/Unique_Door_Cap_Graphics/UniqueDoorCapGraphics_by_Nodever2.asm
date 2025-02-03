@@ -1,82 +1,27 @@
 lorom
 
-; June 10, 2022. Release v1.01
-; Version history:
-{
-	; June 07, 2022 (v1.00): Initial release.
-	; June 10, 2022 (v1.01): Fixed eye door HP, was 07, is now 03 like vanilla.
-}
-; Developed with xkas v0.06. Also tested with metconst asar.
-; This is an ASM file by Nodever2. Please give credit if you use it, it is probably my highest effort patch release so far. Thanks to PJ's docs as always, and for JAM for the elevator vertical door display bugfix.
-; Apologies in advance for how verbose this is, but my intent is for people of all skill levels to be able to understand and use this patch.
-; If you already know what you're doing, feel free to start reading code and come back to the walls of text if you get stuck.
-; This file also makes heavy use of collapsible curly braces, make sure you have a code editor such as notepad++ which can collapse their contents.
-; Relevant: https://wiki.metroidconstruction.com/doku.php?id=super:expert_guides:asm_stylesheet
-; If you ever have any questions or issues with this patch, please feel free to contact me. My discord username is Nodever2#1624.
+; notes about unique door graphics patch:
 
-; This patch completely rewrites all door caps in Super Metroid with the objective of making them MUCH easier to customize.
-; Many door cap customizations which previously would have required a high amount of effort or tedium are now relatively easy.
-; Even for advanced users, editing the instruction lists with this ASM file should be much easier than trying to do it from scratch,
-; as they are now more readable and repeated ones use macros, so you'll only have to edit 1 instruction list for each door type you want to edit.
+; I am coming back to developing this after a year of absence. Here is what I have learned:
+; - The tile table needs to be set up as follows: The door with "Index of room graphics slot to DMA graphics into" will reference a specific set of door tiles in the tile table.
+;   > The door with index 0 will reference the very top left tile and the one below it.
+;   > The door with index 1 will reference the two tiles to the right of that.
+;   and so on...
+;   Horizontal doors follow a very similar pattern except index 0 uses tile 10 and 11 and index 1 uses I think 12 and 13 and index 3 uses 14 and 15 etc...?  Still trying to figure that out.
+;   you may notice that this technically uses 2x the tile table space compared to what is required. This can definitely be optimized and probably should (TODO) but for now it uses same space as vanilla.
+;   This means that the tile table actually has to be set up correctly, manually. This could be programmatically done... I'll think about it, but for now each tile in the TTB needs to point to the correct place in VRAM.
 
-; Some values that are now extremely easy to tweak: Each door's opening/closing speeds, # of hits required to open, sfx values, and more. Repointing things is also easy.
+; TODO: make eye doors dynamically load gfx? did I already do that? no I dont think so, I think I just have to move eye doors out.. hmm..
 
-; The patch is configured by default to make doors behave almost identically to vanilla Super Metroid. However, this patch does more than just reproduce vanilla
-; functionality; some inconsistencies in vanilla are now fixed, such as some specific door types/orientations using different animation speeds, some door colors
-; not having hit sounds, and grey doors opening when hit by power bombs but blue doors not doing so.
-; In addition to fixing inconsistencies, arguably the biggest innovation this patch brings is that (by default) ALL DOORS ARE NONSOLID AS SOON AS THEY BEGIN TO OPEN.
-; They remain solid while they are closing. Also, DOOR CLOSING/FLASHING ANIMATIONS CAN GENERALLY BE INTERRUPTED NOW WHEN THEY PREVIOUSLY SOMETIMES COULDN'T.
-; For example, while a blue door is in its closing animation, you can shoot it to have it immediately start opening again; in vanilla, the door would have ignored your shot until it finished
-; the closing animation. All colored doors would behave similarly in vanilla but can now be immediately shot even while closing, no matter how slowly you set the animation speed to.
+; I need to make better instructions on how to better allocate the VRAM for this. TODO. It should be actually somewhat trivial. maybe I need to allocate more than 3 bits for the index into vram though.
+; in my test ROM I set up H doors for all indices but for V doors I only did 0-5
+; See SetDoorTile to understand how getting this index into the tile table works.
 
-; Of course, if you do not like these bundled changes, it is not too difficult to revert them to vanilla functionality, but with these in particular there is little reason to.
+; I also need to figure out a way to draw a door with DMA'd graphics but a different palette.. this actually will not be trivial since it involves changing the TTB...
 
-; The main things you want to edit are in the "DEFINES\PRIMARY TWEAKS" and "DEFINES\DATA LOCATIONS" sections,
-; you can poke around the rest of the file if you're familiar with asm.
 
-; Scope of this document: Blue/Red/Green/Yellow/Grey doors, BT door, Eye doors (Gadoras).
-; Outside of scope: Any other PLM
 
-;---Commonly used acronyms/abbreviations in this document:---
-{
-	; CLR: Abbreviation for "Color"/Type of a door. Valid door "colors":
-	; (Note that for properties that are shared between YLW, GRN, and RED doors, "CLR" may be used directly to refer to them.)
-		; YLW: "Yellow".
-		; GRN: "Green".
-		; RED: included for completeness' sake.
-		; BLU: "Blue".
-		; GRY: "Grey".
-		; EYE: Refers to "Eye Doors" aka "Gadoras".
-	
-	; O: Abbreviation for "Orientation" of a door. Valid door "orientations":
-		; H: "Horizontal" (i.e. a door that Samus travels horizontally through)
-		; V: "Vertical:   (i.e. a door that Samus travels vertically through)
-	
-	; D: Abbreviation for the "Direction" that a door faces. Valid door "directions":
-		; L: "Left"  (i.e. a door that Samus travels through FROM LEFT TO RIGHT)
-		; R: "Right" (i.e. a door that Samus travels through FROM RIGHT TO LEFT)
-		; U: "Up"    (i.e. a door that Samus travels through FROM ABOVE TO BELOW)
-		; D" "Down"  (i.e. a door that Samus travels through FROM BELOW TO ABOVE)
-	
-	; "Loc": Abbreviation for "Location" regarding locations of writing data.
-	; "Inst"/"Insts": Abbreviation for "Instruction"/"Instructions" regarding PLM instructions.
-	
-	; Animation Frame Number Disambiguation:
-		; Animation frame numbers in this document are generally based on a door's CLOSING ANIMATION (for non-eye doors).
-		; Frame 1 is the first frame of a door's closing animation.
-		; Frame 4 is a closed door.
-}
 
-;---Regarding information printed by this ASM to the console at assemble time:---
-{
-	; This ASM file rewrites doors within the same space as vanilla in a way that uses less space in several regions.
-	; This patch reports the beginning and end addresses of newly generated freespace regions in $84, which can safely be used to store other custom data.
-	; This patch also has warnpc's setup in the event that the available space is exceeded (not possible without modifying this patch's ASM).
-	; If a warnpc is printed, assume that the beginning and end addresses of available space are invalid.
-	
-	; This ASM also prints the location of every PLM entry that is written to ROM. By default, every one of them are written in their vanilla locations for compatibility reasons.
-	; However, they can easily be repointed if you have the need to do so. In that case, you will need to configure your editor's PLM data folder accordingly.
-}
 
 ; Scroll past the "Defines" section for information on data structures used by code in this document, including some new ones.
 
@@ -153,21 +98,14 @@ lorom
 		
 		;---DOOR TILES---
 		{
-            ; TODO - THE <CLR> AND GRY(?) ONES OF THESE WILL BECOME UNUSED!!!! CLEAN THIS UP!!
+            ; TODO - THE GRY(?) ONES OF THESE WILL BECOME UNUSED!!!! CLEAN THIS UP!!
             
 			; IF YOU MOVE DOOR TILES AROUND IN THE TILETABLE, YOU WILL NEED TO EDIT THE DEFINES IN THIS SECTION.
 			; This tells the asm where to read graphics tiles from.
 			
 			; These are the Tile Table index (Tilemap Tile Number in SMART's Tileset Editor) of the "edge tile" or outer tile of the door cap.
 			; Needs to be specified for both horizontal and vertical doors.
-			!YLWHDoorTile   = $0000 ; vanilla $0000. edge tile of YLW horizontal door.
-			!GRNHDoorTile   = $0004 ; vanilla $0004. edge tile of GRN horizontal door.
-			!REDHDoorTile   = $0008 ; vanilla $0008. edge tile of RED horizontal door.
 			!BLUHDoorTile   = $000C ; vanilla $000C. edge tile of BLU horizontal door.
-			
-			!YLWVDoorTile   = $0011 ; vanilla $0011. edge tile of YLW vertical door.
-			!GRNVDoorTile   = $0015 ; vanilla $0015. edge tile of GRN vertical door.
-			!REDVDoorTile   = $0019 ; vanilla $0019. edge tile of RED vertical door.
 			!BLUVDoorTile   = $001D ; vanilla $001D. edge tile of BLU vertical door.
 			
 			!WHTHDoorTile   = $00A0
@@ -484,8 +422,8 @@ lorom
 	{
 		; draw instruction is a list of:
 		
-		;  nnnn       ; Number of blocks
-		;  bbbb [...] ; Blocks
+		;  nnnn       ; Number of blocks (add 8000 to draw top to bottom instead of left to right)
+		;  bbbb [...] ; Level Data Blocks
 		;  xx yy      ; X and Y offsets from origin to start drawing from
 		
 		; terminated by xx yy = 00 00.
@@ -565,6 +503,7 @@ macro ColoredDoorSetup(CLR)
 		LDA #DoorCLRVHit : STA !RAMPLMLinkInstrs,x            ; set door link instruction
 		
 	?mainclrsetup:
+		print "?main<CLR>setup: ", pc
 		LDA #!<CLR>HP|!DoorSpeedsTable<CLR>Index|!DMAPalette<CLR>
         STA !RAMPLMVars2,x  ; set door speeds table index, door HP, DMA pal.
 		LDA #!GotoLinkIfShot<CLR> : STA !RAMPLMPreInsts,x     ; set door pre-instruction
@@ -1235,7 +1174,7 @@ endmacro
         ; DMA transfer
         ; TODO convert these addresses into labels
         
-        
+        print "InstDMADoor: ", pc
         PHY : LDY $0330
         ; for $D0,x table:
         ;  Size is 2 bytes
@@ -1293,9 +1232,11 @@ endmacro
         PLA : RTS ; return from processing this PLM this frame
         
         DoorDMAGfxAddrTables:
+		print "DoorDMAGfxAddrTables: ", pc
             dw GRYDoorDMAGfxAddrs, YLWDoorDMAGfxAddrs, GRNDoorDMAGfxAddrs, REDDoorDMAGfxAddrs
         
         GRYDoorDMAGfxAddrs:
+		print "GRYDoorDMAGfxAddrs: ", pc
             dw GRYDoorDMAGfxf4  ; fully closed
             dw GRYDoorDMAGfxf3  ; f3
             dw GRYDoorDMAGfxf2  ; f2
@@ -1303,6 +1244,7 @@ endmacro
             dw GRYDoorDMAGfxwht ; white door gfx
         
         YLWDoorDMAGfxAddrs:
+		print "YLWDoorDMAGfxAddrs: ", pc
             dw YLWDoorDMAGfxf4
             dw YLWDoorDMAGfxf3
             dw YLWDoorDMAGfxf2
@@ -1310,6 +1252,7 @@ endmacro
             dw YLWDoorDMAGfxwht
         
         GRNDoorDMAGfxAddrs:
+		print "GRNDoorDMAGfxAddrs: ", pc
             dw GRNDoorDMAGfxf4
             dw GRNDoorDMAGfxf3
             dw GRNDoorDMAGfxf2
@@ -1317,6 +1260,7 @@ endmacro
             dw GRNDoorDMAGfxwht
         
         REDDoorDMAGfxAddrs:
+		print "REDDoorDMAGfxAddrs: ", pc
             dw REDDoorDMAGfxf4
             dw REDDoorDMAGfxf3
             dw REDDoorDMAGfxf2
@@ -1452,12 +1396,14 @@ endmacro
 		; !RAMDPCustomPLMDrawInstructionLocation+$0A;terminator for draw instruction
 		; !RAMDPCustomPLMDrawInstructionLocation+$0C;unused
 	InstDrawDoorH:
+	print "InstDrawDoorH: ", pc
 		LDA #!HDoorTileDist : STA !RAMDPCustomPLMDrawInstructionLocation+$0A ; used by below routine. Offset in CRE TTB to add.
 		LDA #$0800          : STA !RAMDPCustomPLMDrawInstructionLocation+$0C ; used by below routine. Flip mask.
 		LDA #$8004          : STA !RAMDPCustomPLMDrawInstructionLocation+$00 ; draw inst # of tiles to draw
 		BRA InstDrawDoor
 		
 	InstDrawDoorV:
+	print "InstDrawDoorV: ", pc
 		LDA #!VDoorTileDist : STA !RAMDPCustomPLMDrawInstructionLocation+$0A ; used by below routine. Offset in CRE TTB to add.
 		LDA #$0400          : STA !RAMDPCustomPLMDrawInstructionLocation+$0C ; used by below routine. Flip mask.
 		LDA #$0004          : STA !RAMDPCustomPLMDrawInstructionLocation+$00 ; draw inst # of tiles to draw
