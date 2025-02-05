@@ -19,7 +19,7 @@ lorom
 
 ; I also need to figure out a way to draw a door with DMA'd graphics but a different palette.. this actually will not be trivial since it involves changing the TTB...
 
-
+; note to self: put it out there that if anyone has alt doors they'd like to draw I'd be happy to include them as alternate designs within the patch release itself.
 
 
 
@@ -38,21 +38,22 @@ lorom
 			;  (the higher the number, the slower the animation. Minimum value for frame delays is 0001.)
 			; these can all be safely changed.
 			
-			!BLUOpenDelay    = $0006 ; vanilla is $0006. Blue door opening anim.
-			!BLUClosDelay    = $0006 ; vanilla is $0002. Blue door closing anim.
-			!YLWOpenDelay    = $0006 ; vanilla is $0006 and sometimes 0004... wtf nintendo. Yellow door opening anim.
-			!YLWClosDelay    = $0006 ; vanilla is $0002. Yellow door closing anim.
-			!GRNOpenDelay    = $0006 ; vanilla is $0006. Green door opening anim.
-			!GRNClosDelay    = $0006 ; vanilla is $0002. Green door closing anim.
-			!REDOpenDelay    = $0006 ; vanilla is $0006. Red door opening anim.
-			!REDClosDelay    = $0006 ; vanilla is $0002. Red door closing anim.
-			!GRYOpenDelay    = $0006 ; vanilla is $0004 <- so much vanilla inconsistency. Grey door opening anim.
-			!GRYClosDelay    = $0006 ; vanilla is $0002. Grey door closing anim.
-			
+			!BLUOpenDelay    = $0003 ; vanilla is $0006. Blue door opening anim.
+			!BLUClosDelay    = $0003 ; vanilla is $0002. Blue door closing anim.
+			!YLWOpenDelay    = $0003 ; vanilla is $0006 and sometimes 0004... wtf nintendo. Yellow door opening anim.
+			!YLWClosDelay    = $0003 ; vanilla is $0002. Yellow door closing anim.
+			!GRNOpenDelay    = $0003 ; vanilla is $0006. Green door opening anim.
+			!GRNClosDelay    = $0003 ; vanilla is $0002. Green door closing anim.
+			!REDOpenDelay    = $0003 ; vanilla is $0006. Red door opening anim.
+			!REDClosDelay    = $0003 ; vanilla is $0002. Red door closing anim.
+			!GRYOpenDelay    = $0003 ; vanilla is $0004 <- so much vanilla inconsistency. Grey door opening anim.
+			!GRYClosDelay    = $0003 ; vanilla is $0002. Grey door closing anim.
+			!WHTOpenDelay    = $0008 ; All door opening anim white flash
+
 			!TorizoClosDelay = $0002 ; vanilla is $0002. Torizo door closing anim.
 			
-			!DHitCLRDelay    = $0003 ; vanilla $0004. Time that the door color is shown in missile door hit animation (i.e. animation where door is hit but has greater than zero HP remaining).
-			!DHitBLUDelay    = $0002 ; vanilla $0003. Time that the color blue is shown in missile door hit animation.
+			!DHitCLRDelay    = $0004 ; vanilla $0004. Time that the door color is shown in missile door hit animation (i.e. animation where door is hit but has greater than zero HP remaining).
+			!DHitBLUDelay    = $0003 ; vanilla $0003. Time that the color blue is shown in missile door hit animation.
 			!FlashGRYGDelay  = $0004 ; vanilla $0004. The time that grey doors are grey in their unlocked flashing animation.
 			!FlashGRYBDelay  = $0003 ; vanilla $0003. The time that grey doors are blue in their unlocked flashing animation.
 			
@@ -85,7 +86,7 @@ lorom
 			; Each of these refers to the number of hits from the proper weapon that are required to open each door.
 			!YLWHP = $01 ; vanilla $01. Changing this isn't very effective since PBs hit it multiple times.
 			!GRNHP = $01 ; vanilla $01
-			!REDHP = $01 ; vanilla $05
+			!REDHP = $05 ; vanilla $05
 			!GRYHP = $01 ; vanilla $01, also applies to torizo door. Hitting grey doors with any weapon (except power bombs if the below define is set to -2) will damage the grey door.
 			!EYEHP = $03 ; vanilla $03
 			
@@ -186,12 +187,13 @@ lorom
 		; These are indices into each door's DoorSpeedTable, used as an argument to our new door draw instruction. See InstDrawDoor.
 		!OpenSpeedIndex = $00 ; index of all door opening speeds
 		!ClosSpeedIndex = $01 ; index of all door closing speeds
-		!HitBSpeedIndex = $02 ; index of colored door blue anim delay when flashing when hit
-		!HitCSpeedIndex = $03 ; index of colored door color anim delay when flashing when hit
-		!GryBSpeedIndex = $02 ; index of grey door blue anim delay
-		!GryGSpeedIndex = $03 ; index of grey door grey anim delay
-		!TorizoDSpIndex = $04 ; index of torizo door wait time
-		!TorizoClosSpeedIndex = $05 ; index of torizo door close speed
+		!WHTOpenSpeedIndex = $02
+		!HitBSpeedIndex = $03 ; index of colored door blue anim delay when flashing when hit
+		!HitCSpeedIndex = $04 ; index of colored door color anim delay when flashing when hit
+		!GryBSpeedIndex = $03 ; index of grey door blue anim delay
+		!GryGSpeedIndex = $04 ; index of grey door grey anim delay
+		!TorizoDSpIndex = $05 ; index of torizo door wait time
+		!TorizoClosSpeedIndex = $06 ; index of torizo door close speed
 		!EndAnimSpIndex = $0F ; always results in a frame delay of !EndAnimDelay, specified by draw door InstDrawDoor.
 		
 		!EndAnimDelay = $0001 ; vanilla 0001 or 005E. A frame delay. No reason not to have it 0001, this is the time the final frame of each animation is drawn for nearly every PLM animation
@@ -544,8 +546,10 @@ macro ColoredDoorInstList(O)
 		dw !InstGoto, ?sleep
 	?open:
 		dw !InstOpenSFX : db !OpenSound
-		dw InstDMADoor<O> : db !DMAfw, !EndAnimSpIndex ; instant
-        dw InstDrawDoor<O> : db !DoorCLR<O>Frame4Offset, !TTairbyte|!OpenSpeedIndex; dw InstDrawWHTDoor<O>   : db $00,                     !TTairbyte|!OpenSpeedIndex ; white is !DMAfw, must use InstDMAWHTDoor<O>
+		dw InstDMADoor<O> : db !DMAfw, !EndAnimSpIndex ; Instantly DMA the graphics.
+		dw InstDrawDoor<O> : db !DoorCLR<O>Frame4Offset, !TTairbyte|!WHTOpenSpeedIndex ; Draw the collision and then wait.
+		;dw InstDMADoor<O> : db !DMAf4, !OpenSpeedIndex ;dw InstDrawDoor<O>    : db !DoorCLR<O>Frame4Offset, !TTshotbyte|!HitCSpeedIndex
+		;dw InstDMADoor<O> : db !DMAfw, !WHTOpenSpeedIndex ;dw InstDrawBLUDoor<O> : db !DoorBLU<O>Frame4Offset, !TTshotbyte|!HitBSpeedIndex
 		dw InstDMADoor<O> : db !DMAf3, !OpenSpeedIndex
         dw InstDMADoor<O> : db !DMAf2, !OpenSpeedIndex ;dw InstDrawBLUDoor<O>   : db !DoorCLR<O>Frame2Offset, !TTairbyte|!OpenSpeedIndex
 		;dw InstDrawBLUDoor<O>   : db !DoorCLR<O>Frame1Offset, !TTairbyte|!OpenSpeedIndex
@@ -1191,9 +1195,10 @@ endmacro
         
         ;top of stack holds the start offset of the table to read
         
-        LDA $0000,y : INY : AND #$000F; : CMP #$000F : BNE +
-        ;LDA #$!EndAnimDelay
-    +   ASL
+        LDA $0000,y : BIT #$0080 : BEQ +
+		; TODO: update TTB here. This flag is meant to be for that. 
+	+	AND #$000F : INY
+        ASL
         
         ; A = offset into door DoorDMAGfxAddrTables table
         
@@ -1226,8 +1231,7 @@ endmacro
     .returnwithoutdelay
         RTS
         
-    .returnwithdelay
-        LDA #$0001 : STA !RAMPLMInstTimers,x        
+    .returnwithdelay     
         TYA : STA !RAMPLMInstListPointers,x
         PLA : RTS ; return from processing this PLM this frame
         
@@ -1445,6 +1449,7 @@ endmacro
 		
 		; Returns carry set if EndAnimDelay was loaded
 		LoadDoorAnimSpeed:
+		print "LoadDoorAnimSpeed: ", pc
 			PHX
 			LDA !RAMPLMVars2,x : XBA : AND #$00FF : ASL : TAX
 			LDA DoorSpeedsTables,x : PHA
@@ -1474,6 +1479,7 @@ endmacro
 		GRYDoorSpeeds:
 			dw !GRYOpenDelay
 			dw !GRYClosDelay
+			dw !WHTOpenDelay
 			dw !FlashGRYBDelay
 			dw !FlashGRYGDelay
 			dw !TorizoDoorDelay
@@ -1482,28 +1488,33 @@ endmacro
 		YLWDoorSpeeds:
 			dw !YLWOpenDelay
 			dw !YLWClosDelay
+			dw !WHTOpenDelay
 			dw !DHitBLUDelay
 			dw !DHitCLRDelay
 			
 		GRNDoorSpeeds:
 			dw !GRNOpenDelay
 			dw !GRNClosDelay
+			dw !WHTOpenDelay
 			dw !DHitBLUDelay
 			dw !DHitCLRDelay
 			
 		REDDoorSpeeds:
 			dw !REDOpenDelay
 			dw !REDClosDelay
+			dw !WHTOpenDelay
 			dw !DHitBLUDelay
 			dw !DHitCLRDelay
 			
 		BLUDoorSpeeds:
 			dw !BLUOpenDelay
 			dw !BLUClosDelay
+			dw !WHTOpenDelay
 			
 		EYEDoorSpeeds:
 			dw !BLUOpenDelay ;\
 			dw !BLUClosDelay ;) the eye door specifically needs the blue door speeds first because it jumps to the blue door instruction list
+			dw !WHTOpenDelay
 			
 	}
 	
