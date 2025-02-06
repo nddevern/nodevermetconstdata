@@ -40,7 +40,7 @@ lorom
 			
 			!BLUOpenDelay    = $0003 ; vanilla is $0006. Blue door opening anim.
 			!BLUClosDelay    = $0003 ; vanilla is $0002. Blue door closing anim.
-			!YLWOpenDelay    = $0003 ; vanilla is $0006 and sometimes 0004... wtf nintendo. Yellow door opening anim.
+			!YLWOpenDelay    = $0002 ; vanilla is $0006 and sometimes 0004... wtf nintendo. Yellow door opening anim.
 			!YLWClosDelay    = $0003 ; vanilla is $0002. Yellow door closing anim.
 			!GRNOpenDelay    = $0003 ; vanilla is $0006. Green door opening anim.
 			!GRNClosDelay    = $0003 ; vanilla is $0002. Green door closing anim.
