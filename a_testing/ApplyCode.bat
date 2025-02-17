@@ -6,7 +6,7 @@ del "Hack.smc"
 copy "BaseRom.smc" "Hack.smc"
 
 @echo on
-asar.exe --fix-checksum=off --no-title-check "..\Nodever2\Unique_Door_Cap_Graphics\UniqueDoorCapGraphics_by_Nodever2.asm" ".\Hack.smc"
+asar.exe --fix-checksum=off --no-title-check "..Resources\Nodever2\Unique_Door_Cap_Graphics\UniqueDoorCapGraphics_by_Nodever2.asm" ".\Hack.smc"
 @echo off
 
 @echo ================= BUILD COMPLETED ================= & echo(
