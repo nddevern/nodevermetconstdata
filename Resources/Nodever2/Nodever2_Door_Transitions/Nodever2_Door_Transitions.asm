@@ -1,28 +1,18 @@
 lorom
 
-; So far, only transitions with Samus moving from left to right are modified. And only the speed of the scrolling is changed.
+; Nodever2's door transitions
+;   By now, several of us have rewritten door transitions - this is my take on it.
+
+; So far, only transitions with Samus moving from left to right and right to left are modified. And only the speed of the scrolling is changed.
 ; There are a lot more edits I'd like to do... Namely - Figure out a way to load music in the background(?) and start doing so while the door is scrolling(?), align the screen during the fadeout.
-; When I release this, release two preset: vanilla, faster (my preferred settings), fastest (as fast as it can go).
+; When I release this, release presets: same speed as vanilla, and faster (my preferred settings)
 
 ; When I'm done i'd like to showcase the following patches side by side: the 3 variations of mine, vanilla, project base, redesign, and the kazuto hex tweaks.
-; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, etc...
-
-
-
-; todo validation: is there a way to manually check if the acceleration is too low to reach
-; the max speed before halfway through the transition, and throw an error if so?
-; or maybe my halfway check covers this already
- 
-; keep in mind, this algorithm needs to support arbitrary distances, so we can use it for door alignment as well as scrolling
- 
-
-
-
-
+; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, misalignments, etc...
 
 ; by Nodever2 October 2025
 ; Please give credit if you use this patch.
-; Works with Asar (written with metconst fork of asar 1.90), not xkas.
+; Works with Asar (written with metconst fork of asar 1.90), probably won't work with xkas
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -72,8 +62,6 @@ lorom
     !RamCameraDistanceTraveledWhileAccelerating #= !RamLayer2XSubPosition+2
 
     !RamEnd                   = !RamCameraDistanceTraveledWhileAccelerating
-
-
 
     org !RamStart         : print "First used byte of RAM:              $", pc
     org !RamEnd           : print "First free RAM byte after RAM Usage: $", pc
@@ -155,7 +143,6 @@ org $82E915 : JSL SpawnDoorCap
     .stopAcceleratingWithPull
         PLA
     .stopAccelerating
-        ;LDA !CameraMaxSpeed : STA !RamCameraSpeed ; if we never hit the max this is a problem
         LDA !RamCameraState : INC : STA !RamCameraState
         LDA !RamLayer1XPosition : SEC : SBC !RamLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
         STA !RamCameraDistanceTraveledWhileAccelerating
@@ -170,7 +157,7 @@ org $82E915 : JSL SpawnDoorCap
     .decelerate
         LDA !RamCameraSubSpeed : SEC : SBC !CameraSubAcceleration : STA !RamCameraSubSpeed
         LDA !RamCameraSpeed : SBC !CameraAcceleration : STA !RamCameraSpeed
-    .setPosition ; here is where we invert the direction we add to the layer 1 position if needed
+    .setPosition
         LDA !RamDoorDirection : BIT #$0001 : BNE ..invert
         LDA !RamLayer1XSubPosition : CLC : ADC !RamCameraSubSpeed : STA !RamLayer1XSubPosition
         LDA !RamLayer1XPosition : ADC !RamCameraSpeed : STA !RamLayer1XPosition
@@ -185,17 +172,14 @@ org $82E915 : JSL SpawnDoorCap
         LDA !RamLayer1XPosition : CMP !RamLayer1XDestination : BPL .stop : BRA +
     ..invert
         LDA !RamLayer1XDestination : CMP !RamLayer1XPosition : BPL .stop
-    +   ;CMP #$0001 : BEQ .stop : BMI .stop
-        LDA !RamCameraSpeed : BMI .stop
-        ;LDA !RamCameraSubSpeed : BPL .stop ; if subspeed < 8000, stop
-
+    +   LDA !RamCameraSpeed : BMI .stop
         PLA : PLX : PLP : CLC : RTL
     .stop
         LDA !RamLayer1XDestination : STA !RamLayer1XPosition
         JSL CalculateLayer2Position
         PLA : PLX : PLP : SEC : RTL
     
-    SpawnDoorCap: ; move Samus to door cap position for now
+    SpawnDoorCap: ; move Samus to door cap position for now while I'm testing this. Actually I might just stick with this.
         LDA $14 : AND #$00FF : ASL #4 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
         ;LDA $15 : AND #$00FF : ASL #4 : STA !RamSamusYPosition
         JSL $84846A ; instruction replaced by hijack
