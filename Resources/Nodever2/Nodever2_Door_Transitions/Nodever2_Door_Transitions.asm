@@ -7,8 +7,18 @@ lorom
 ; When I'm done i'd like to showcase the following patches side by side: the 3 variations of mine, vanilla, project base, redesign, and the kazuto hex tweaks.
 ; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, etc...
 
-math round off
-math pri on
+
+
+; todo validation: is there a way to manually check if the acceleration is too low to reach
+; the max speed before halfway through the transition, and throw an error if so?
+; or maybe my halfway check covers this already
+ 
+; keep in mind, this algorithm needs to support arbitrary distances, so we can use it for door alignment as well as scrolling
+ 
+
+
+
+
 
 ; by Nodever2 October 2025
 ; Please give credit if you use this patch.
@@ -21,19 +31,32 @@ math pri on
     ; Constants - feel free to edit these
     !FreespaceAnywhere = $B88000
     !FreespaceAnywhereEnd = $B8FFFF
-    !TransitionLength = $0040 ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
-                              ; Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
+    !Freespace80 = $80CD8E
+    !Freespace80End = $80FFC0
     !ScreenFadeSpeed = #$0004 ; Higher = slower
+    !CameraAcceleration = #$0001
+    !CameraSubAcceleration = #$0000
+    !CameraMaxSpeed = #$000F ; Should be 000F or less.
 
     ; Vanilla variables
     !RamDoorTransitionFunctionPointer = $099C
     !RamGameState = $0998
     !RamDoorTransitionFrameCounter = $0925 ; for horizontal doors, 0 to !TransitionLength. vertical, 0 to !TransitionLength-1...
     !RamLayer1XPosition = $0911
+    !RamLayer1XDestination = $0927
     !RamLayer2XPosition = $0917
     !RamSamusXPosition = $0AF6
+    !RamSamusYPosition = $0AFA
     !RamSamusXSubPosition = $0AF8
     !RamSamusPrevXPosition = $0B10
+    !RamDoorDirection = $0791
+    ;{
+    ;    0: Right
+    ;    1: Left
+    ;    2: Down
+    ;    3: Up
+    ;    +4: Close a door on next screen
+    ;}
 
     ; new variables - can repoint the ram that these use
     !RamBank                  = $7F0000
@@ -41,7 +64,16 @@ math pri on
     !RamLayer1StartPos       #= !RamStart+2
     !RamLayer2StartPos       #= !RamLayer1StartPos+2
     !RamSubtractFlag         #= !RamLayer2StartPos+2 ; 0000 = add, 8000 = subtract
-    !RamEnd                   = !RamSubtractFlag
+    !RamCameraSpeed          #= !RamSubtractFlag+2
+    !RamCameraSubSpeed       #= !RamCameraSpeed+2
+    !RamCameraState          #= !RamCameraSubSpeed+2 ; 0 = accelerating, 1 = moving at full speed, 2 = decelerating
+    !RamLayer1XSubPosition   #= !RamCameraState+2
+    !RamLayer2XSubPosition   #= !RamLayer1XSubPosition+2
+    !RamCameraDistanceTraveledWhileAccelerating #= !RamLayer2XSubPosition+2
+
+    !RamEnd                   = !RamCameraDistanceTraveledWhileAccelerating
+
+
 
     org !RamStart         : print "First used byte of RAM:              $", pc
     org !RamEnd           : print "First free RAM byte after RAM Usage: $", pc
@@ -58,106 +90,116 @@ math pri on
 
 org $82D961 : LDA !ScreenFadeSpeed  
 
-org $80AD5A : JSL SetupScrolling
+org $80AD70 : JSR SetupScrolling ; right
+org $80AD9A : JSR SetupScrolling ; left
+org $80ADC4 : JSR SetupScrolling ; down
+org $80AE04 : JSR SetupScrolling ; up
 
-org $80AEB5 : CPX #!TransitionLength
+org $82E915 : JSL SpawnDoorCap
 
 ; ==============================================
 ; ============== DOOR TRANSITIONS ==============
 ; ==============================================
 {
-    ; Scrolling right
+    org $80AE5C : JSR Scrolling
     org $80AE7E
+    Scrolling:
         LDX $0925 : PHX
-        LDA #$0000 : STA !RamSamusXSubPosition
-        LDA !RamLayer1XPosition : CLC : ADC #$0040 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
-        JSL BezierTest
-        BRA Continue
-    warnpc $80AEAC
-    org $80AEAC
-        Continue:
+        ;LDA #$0000 : STA !RamSamusXSubPosition
+        ;LDA !RamLayer1XPosition : CLC : ADC #$0040 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
+        JSL Update
+        PHP
+        JSL $80A3A0
+        LDA $02,s : TAX : INX : STX !RamDoorTransitionFrameCounter
+        PLP : BCC +
+        JSL $80A3A0
+        PLX : SEC : RTS
+    +   PLX : CLC : RTS
+    CalculateLayer2Position:
+        JSR $A2F9 ; X
+        JSR $A33A ; Y
+        RTL
+    warnpc $80AEC2
 
-    org !FreespaceAnywhere
+
+    org !Freespace80
     SetupScrolling:
-        SEC : SBC #$0100 : STA !RamLayer1XPosition : PHA ; Instructions replaced by hijack
         PHP : REP #$30
-        LDA $0791 : AND #$0003 : BNE +
-        ; If scrolling right: Setup my custom vars
         LDA !RamLayer1XPosition : STA !RamLayer1StartPos
         LDA !RamLayer2XPosition : STA !RamLayer2StartPos
+        LDA #$0000 : STA !RamCameraSpeed : STA !RamCameraSubSpeed : STA !RamCameraState : STA !RamLayer1XSubPosition
+        JSR Scrolling ; Instruction replaced by hijack (effectively)
+        PLP : RTS
+    warnpc !Freespace80End
 
-    +   PLP : PLA : RTL
-
+    org !FreespaceAnywhere
     ; Scrolls the screen. This function is expected to be called every frame until this function returns carry set
-    BezierTest:
-        PHP : PHA
+    Update:
+        PHP : PHX : PHA
         REP #$30
-        LDA !RamDoorTransitionFrameCounter : CMP #!TransitionLength-1 : BMI .continue
-        LDA !RamLayer1StartPos : CLC : ADC #$0100 : STA !RamLayer1XPosition
-        LDA !RamLayer2StartPos : CLC : ADC #$0100 : STA !RamLayer2XPosition
-        PLA : PLP : RTL
-    .continue
-        PHX : PHB
-        PHK : PLB ; DB = current bank
-        LDX !RamDoorTransitionFrameCounter
-        LDA .lookupTable,x : AND #$00FF : BNE + : INC : + : PHA
-        CLC : ADC !RamLayer1StartPos : STA !RamLayer1XPosition
+
+        LDA !RamCameraState : ASL : TAX : JMP (CameraStateHandlers,x)
+    CameraStateHandlers:
+        dw .accelerate, .move, .decelerate
+
+        ; update speed then layer1 pos
+        ; first check if camera needs to be accelerated
+    .accelerate
+        LDA !RamCameraSpeed : CMP !CameraMaxSpeed : BPL .stopAccelerating
+        LDA !RamLayer1XDestination : SEC : SBC !RamLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
+        LSR : PHA : LDA !RamLayer1XPosition : SEC : SBC !RamLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
+        CMP $01,s : BPL .stopAcceleratingWithPull : PLA ; stop accelerating if we're over halfway
+        LDA !CameraSubAcceleration : CLC : ADC !RamCameraSubSpeed : STA !RamCameraSubSpeed ; continue accelerating
+        LDA !CameraAcceleration : ADC !RamCameraSpeed : STA !RamCameraSpeed
+        BRA .setPosition
+    .stopAcceleratingWithPull
         PLA
-        CLC : ADC !RamLayer2StartPos : STA !RamLayer2XPosition
+    .stopAccelerating
+        ;LDA !CameraMaxSpeed : STA !RamCameraSpeed ; if we never hit the max this is a problem
+        LDA !RamCameraState : INC : STA !RamCameraState
+        LDA !RamLayer1XPosition : SEC : SBC !RamLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
+        STA !RamCameraDistanceTraveledWhileAccelerating
+    .move
+        ; first, check if we need to start declerating
+        LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XPosition : BPL +++ : EOR #$FFFF : INC : +++
+        CMP !RamCameraDistanceTraveledWhileAccelerating
+        BEQ + : BPL .setPosition
+        ; start decelerating
+    +   LDA !RamCameraState : INC : STA !RamCameraState
+        ;BRA .setPosition ; start decelerating next frame
+    .decelerate
+        LDA !RamCameraSubSpeed : SEC : SBC !CameraSubAcceleration : STA !RamCameraSubSpeed
+        LDA !RamCameraSpeed : SBC !CameraAcceleration : STA !RamCameraSpeed
+    .setPosition ; here is where we invert the direction we add to the layer 1 position if needed
+        LDA !RamDoorDirection : BIT #$0001 : BNE ..invert
+        LDA !RamLayer1XSubPosition : CLC : ADC !RamCameraSubSpeed : STA !RamLayer1XSubPosition
+        LDA !RamLayer1XPosition : ADC !RamCameraSpeed : STA !RamLayer1XPosition
+        BRA +
+    ..invert
+        LDA !RamLayer1XSubPosition : SEC : SBC !RamCameraSubSpeed : STA !RamLayer1XSubPosition
+        LDA !RamLayer1XPosition : SBC !RamCameraSpeed : STA !RamLayer1XPosition
+    +   JSL CalculateLayer2Position
+    .checkStop
+        ; check if we need to stop
+        LDA !RamDoorDirection : BIT #$0001 : BNE ..invert
+        LDA !RamLayer1XPosition : CMP !RamLayer1XDestination : BPL .stop : BRA +
+    ..invert
+        LDA !RamLayer1XDestination : CMP !RamLayer1XPosition : BPL .stop
+    +   ;CMP #$0001 : BEQ .stop : BMI .stop
+        LDA !RamCameraSpeed : BMI .stop
+        ;LDA !RamCameraSubSpeed : BPL .stop ; if subspeed < 8000, stop
 
-
-        PLB : PLX
-        PLA : PLP : RTL
-
-    ; The ultimate cheat code: Making the assembler do all the work.
-    ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
-    ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
-    ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
-    ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
-    ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
-    ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
-    .lookupTable:
-    macro generateLookupTableEntry(t)
-        db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
-    endmacro
-    print "BezierTest_lookupTable: ", pc
-    !tCounter = 0
-    while !tCounter < !TransitionLength
-        %generateLookupTableEntry(!tCounter)
-        !tCounter #= !tCounter+1
-    endwhile
-
-    ;SixteenBitDivison:
-    ;    ; Divides 16-bit X by 16-bit A
-    ;    ; Result in $12 with remainder in X
-    ;    PHY
-    ;    STZ $12
-    ;    LDY #$0001
-;
-    ;-   ASL
-    ;    BCS +
-    ;    INY
-    ;    CPY #$0011
-    ;    BNE -
-;
-    ;+   ROR
-;
-    ;-   PHA
-    ;    TXA
-    ;    SEC
-    ;    SBC $01,s
-    ;    BCC +
-    ;    TAX
-;
-    ;+   ROL $12
-    ;    PLA
-    ;    LSR
-    ;    DEY
-    ;    BNE -
-;
-    ;    PLY : RTS
-    ;    ;P.JBoy — 5/22/2025 3:19 PM
-    ;    ;I ripped that one off from the "Programming the 65816" book
-
+        PLA : PLX : PLP : CLC : RTL
+    .stop
+        LDA !RamLayer1XDestination : STA !RamLayer1XPosition
+        JSL CalculateLayer2Position
+        PLA : PLX : PLP : SEC : RTL
     
+    SpawnDoorCap: ; move Samus to door cap position for now
+        LDA $14 : AND #$00FF : ASL #4 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
+        ;LDA $15 : AND #$00FF : ASL #4 : STA !RamSamusYPosition
+        JSL $84846A ; instruction replaced by hijack
+        RTL
+
+    warnpc !FreespaceAnywhereEnd
 }
