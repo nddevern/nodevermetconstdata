@@ -118,7 +118,10 @@ org $80AD9A : JSR SetupScrolling ; left
 org $80ADC4 : JSR SetupScrolling ; down
 org $80AE04 : JSR SetupScrolling ; up
 
-org $82E915 : JSL SpawnDoorCap
+org $82E4C5 : JSL PositionSamus
+org $82E3CF : BRA SkipPlacingSamus
+org $82E3E2
+    SkipPlacingSamus:
 
 ; ==============================================
 ; ============== DOOR TRANSITIONS ==============
@@ -321,22 +324,67 @@ org $82E915 : JSL SpawnDoorCap
         LDA !tLayer1Destination : STA !tLayer1Position
         PLA : PLX : PLP : SEC : RTL
     
-    SpawnDoorCap: ; move Samus to door cap position for now while I'm testing this. Actually I might just stick with this.
-        LDA !RamDoorDirection : AND #$0003 : BIT #$0002 : BNE .verticalTransition
-    .horizontalTransition
-        LDA $14 : AND #$00FF : ASL #4 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
+    PositionSamus: ; move Samus to door cap position for now while I'm testing this. Actually I might just stick with this.
+        
+        PHX : PHP : PHB
+        REP #$30
+
+        ; first set Samus to correct screen
+        LDA !RamLayer1XDestination : AND #$FF00 : PHA : LDA !RamSamusXPosition : AND #$00FF : ORA $01,s : STA !RamSamusXPosition : PLA
+        LDA !RamLayer1YDestination : AND #$FF00 : PHA : LDA !RamSamusYPosition : AND #$00FF : ORA $01,s : STA !RamSamusYPosition : PLA
+        
+        ; then set her position on the screen
+        LDA $0791   ;\
+        ASL A       ;|
+        CLC         ;|
+        ADC #$E68A  ;) A = [$E68A + [door direction] * 2] (PLM ID)
+        TAX         ;|
+        LDA $0000,x ;/
+        BNE .doorcap ; If door has door cap, use it's X and Y positions to set Samus
+        ; else... make some assumptions.
+    .nodoorcap
+        LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
+    ..horizontalTransition
+        LDA !RamLayer1XDestination : STA !RamSamusXPosition
+        LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingRight
+    ...samusMovingLeft
+        LDA !RamSamusXPosition : CLC : ADC #$0100-$30 : STA !RamSamusXPosition
+        BRA ..continue
+    ...samusMovingRight
+        LDA !RamSamusXPosition : CLC : ADC #$0030 : STA !RamSamusXPosition
+        BRA ..continue
+    ..verticalTransition
+        LDA !RamLayer1YDestination : STA !RamSamusYPosition
+        LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingDown
+    ...samusMovingUp
+        LDA !RamSamusYPosition : CLC : ADC #$0100-$1C : STA !RamSamusYPosition
+        BRA ..continue
+    ...samusMovingDown
+        LDA !RamSamusYPosition : CLC : ADC #$0040 : STA !RamSamusYPosition
+    ..continue
         BRA .finish
-    .verticalTransition
-        LDA $15 : AND #$00FF : ASL #4 : STA !RamSamusYPosition
-        LDA !RamDoorDirection : BIT #$0001 : BEQ ..samusMovingDown
-    ..samusMovingUp
-        LDA !RamSamusYPosition : SEC : SBC #$001C : STA !RamSamusYPosition : STA !RamSamusPrevYPosition
+
+    .doorcap
+        LDX $078D : LDA $830004,x : TAX ; X = [$83:0000 + [door pointer] + 4] (X and Y positions)
+        LDA !RamDoorDirection : AND #$0003 : BIT #$0002 : BNE ..verticalTransition
+    ..horizontalTransition
+        LDA !RamLayer1XDestination : STA !RamSamusXPosition
+        TXA : AND #$000F : ASL #4 : ORA !RamSamusXPosition : STA !RamSamusXPosition
         BRA .finish
-    ..samusMovingDown
-        LDA !RamSamusYPosition : CLC : ADC #$0020 : STA !RamSamusYPosition : STA !RamSamusPrevYPosition
+    ..verticalTransition
+        LDA !RamLayer1YDestination : STA !RamSamusYPosition
+        TXA : XBA : AND #$000F : ASL #4 : ORA !RamSamusYPosition : STA !RamSamusYPosition
+        LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingDown
+    ...samusMovingUp
+        LDA !RamSamusYPosition : SEC : SBC #$0038 : STA !RamSamusYPosition
+        BRA .finish
+    ...samusMovingDown
+        LDA !RamSamusYPosition : CLC : ADC #$0010 : STA !RamSamusYPosition
     .finish
-        JSL $84846A ; instruction replaced by hijack
-        RTL
+        LDA !RamSamusXPosition : STA !RamSamusPrevXPosition
+        LDA !RamSamusYPosition : STA !RamSamusPrevYPosition
+        JSL $89AB82 ; instruction replaced by hijack - Load FX header
+        PLB : PLP : PLX : RTL
 
     warnpc !FreespaceAnywhereEnd
 }
