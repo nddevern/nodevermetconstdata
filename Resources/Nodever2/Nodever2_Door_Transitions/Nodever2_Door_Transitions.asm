@@ -71,6 +71,8 @@ lorom
     !RamSamusXSubPosition             = $0AF8
     !RamSamusPrevXPosition            = $0B10
     !RamSamusPrevYPosition            = $0B14
+    !RamPreviousLayer1YBlock          = $0901
+    !RamPreviousLayer2YBlock          = $0905
     !RamDoorDirection                 = $0791
     ;{
     ;    0: Right
@@ -217,6 +219,9 @@ SetLayerYBlockHandleNegative: {
     warnpc !Freespace80End
 
 
+; This was necessary for vertical doors moving upwards to render the top row of tiles. For some reason.
+org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; up
+
 ; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
 ; =======================================================
@@ -227,6 +232,15 @@ SetLayerYBlockHandleNegative: {
     ; Called every frame during main scrolling.
     MainScrollingRoutine: {
             LDX !RamDoorTransitionFrameCounter : PHX
+
+            BNE +
+            LDA !RamDoorDirection : AND #$0003 : CMP #$0002 : BNE +
+            JSR CalculateLayer2Position
+            ; Seemingly, if we run this, we need to return and wait for next frame to actually scroll.
+            ; Seems like the engine can only DMA 1 horizontal row of tiles onto the screen per frame.
+            ; $0968 was getting overwritten when I tried to continue after this call. $808DAC executes the DMA.
+            JSL DrawTopRowOfScreenForDownwardsTransition : PLX : INX : STX !RamDoorTransitionFrameCounter : CLC : RTS
+        +
 
             JSL ScrollCameraX : PHP
             JSL ScrollCameraY : PHP
@@ -306,9 +320,6 @@ SetLayerYBlockHandleNegative: {
             PLA : STA !RamLayer1YPosition
             PLA : STA !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
-            BNE + : BCS +
-            ;PHP : JSL DrawTopRowOfScreenForDownwardsTransition : PLP ; This fixes a graphical glitch for horizontal doors where the camera also needs to move down.
-            +
             RTL
     }
 
