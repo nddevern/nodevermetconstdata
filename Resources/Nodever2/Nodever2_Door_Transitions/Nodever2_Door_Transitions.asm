@@ -35,6 +35,7 @@ lorom
     !CameraSubAcceleration = #$0000
     !CameraMaxSpeed        = #$000F  ; Should be 000F or less.
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
+    !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
 
     ; Vanilla-like settings:
     ; When these settings are used, the door transition takes almost exactly as long as vanilla.
@@ -115,6 +116,10 @@ lorom
 ; ============== SCREEN FADE TO/FROM BLACK ==============
 ; =======================================================
 {
+    if !ScreenFadesOut == 0
+        org $82E2DB : LDA #$E2F7 : STA !RamDoorTransitionFunctionPointer : JMP $E2F7
+    endif
+
     org $82D961 : LDA !ScreenFadeDelay
 }
 
@@ -180,31 +185,58 @@ lorom
     }
     !Freespace80 := SetupScrolling_freespace
     warnpc !Freespace80End
-
-
 }
+
+; patching $80A3DF to handle horizontal scrolling when the screen is at a negative Y pos. (this took a ton of digging to figure out that this was the problem and solution... heh...)
+; layer 1
+org $80A407
+    LDY $0909 : LDA $08F9 : JSR SetLayerYBlockHandleNegative
+    JSR $A9DB : BRA +
+warnpc $80A416
+org $80A416 : +
+
+; layer 2 - todo this may not have worked, see tourian shaft save station transition
+org $80A43F
+    LDY $090D : LDA $08FD : JSR SetLayerYBlockHandleNegative
+    JSR $A9DB : BRA +
+warnpc $80A44E
+org $80A44E : +
+
+org !Freespace80
+; A: Layer 1/2 Y block
+; Y: BG1/2 Y block
+; PSR.N flag: Set based on A
+SetLayerYBlockHandleNegative: {
+        BPL +
+        LDA #$0000 : STA $0992 : STA $0996 : RTS
+    +   STA $0992 : TYA : STA $0996 : RTS
+    .freespace
+}
+
+    !Freespace80 := SetLayerYBlockHandleNegative_freespace
+    warnpc !Freespace80End
+
 
 ; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
 ; =======================================================
 {
+    org $80A3A0 : CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling:
     org $80AE5C : JSR MainScrollingRoutine
     org $80AE7E
     ; Called every frame during main scrolling.
     MainScrollingRoutine: {
-            LDX $0925 : PHX
-            ;LDA #$0000 : STA !RamSamusXSubPosition
-            ;LDA !RamLayer1XPosition : CLC : ADC #$0040 : STA !RamSamusXPosition : STA !RamSamusPrevXPosition
+            LDX !RamDoorTransitionFrameCounter : PHX
 
             JSL ScrollCameraX : PHP
             JSL ScrollCameraY : PHP
 
             JSR CalculateLayer2Position
-            JSL $80A3A0
+            JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
             LDA $02,s : TAX : INX : STX !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
-            JSL $80A3A0
+            JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; ; why do we call this twice? didn't really observe any effects from commenting this out (yet)
             PLX : SEC : RTS
         +   PLP : ++ : PLX : CLC : RTS
     }
@@ -225,9 +257,9 @@ lorom
             LDA !RamCameraXState : CMP #$0003 : BNE +
             SEC : RTL
 
-        +   LDA #$0000 : PHA ; tInvertDirectionFlag
+        +   LDA #$0000 : PHA ; tInvertDirectionFlag = right
             LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XPosition : BPL +
-            PLA : INC : PHA
+            PLA : INC : PHA ; left
         +   LDA !RamLayer1XDestination : PHA
             LDA !RamLayer1XPosition : PHA
             LDA !RamCameraXDistanceTraveledWhileAccelerating : PHA
@@ -253,9 +285,9 @@ lorom
             LDA !RamCameraYState : CMP #$0003 : BNE +
             SEC : RTL
 
-        +   LDA #$0000 : PHA ; tInvertDirectionFlag
+        +   LDA #$0000 : PHA ; tInvertDirectionFlag = down
             LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YPosition : BPL +
-            PLA : INC : PHA
+            PLA : INC : PHA ; up
         +   LDA !RamLayer1YDestination : PHA
             LDA !RamLayer1YPosition : PHA
             LDA !RamCameraYDistanceTraveledWhileAccelerating : PHA
@@ -275,10 +307,9 @@ lorom
             PLA : STA !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
             BNE + : BCS +
-            PHP : JSL DrawTopRowOfScreenForUpwardsTransition : PLP ; This fixes a graphical glitch for horizontal doors where the camera also needs to move down.
+            ;PHP : JSL DrawTopRowOfScreenForDownwardsTransition : PLP ; This fixes a graphical glitch for horizontal doors where the camera also needs to move down.
             +
             RTL
-        .freespace
     }
 
     ScrollCamera: {
@@ -297,26 +328,6 @@ lorom
 
         ; These defines account for the return addr on the stack, as well as PHP : PHX : PHA
         !tBaseStackOffset #= 1+2+1+2+2 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha
-
-        ; back when we JSL'd into here, the correct base stack offset was $09,s
-        ; 1 for all stack offset stuff
-        ; 3 for return addr
-        ; 1 for php
-        ; 2 for phx
-        ; 2 for pha
-        ; = 9 
-
-        ; now the correct base stack offset is:
-        ; 1 for all stack offset stuff
-        ; 2 for return addr
-        ; 1 for php
-        ; 2 for phx
-        ; 2 for pha
-        ; = 8
-
-
-
-
         !tLayer1StartPos                          = !tBaseStackOffset+0,s : !tLayer1StartPosAfterPha = !tBaseStackOffset+2,s
         !tCameraSpeed                             = !tBaseStackOffset+2,s
         !tCameraSubSpeed                          = !tBaseStackOffset+4,s
@@ -387,18 +398,20 @@ lorom
     !FreespaceAnywhere := ScrollCamera_freespace
     warnpc !FreespaceAnywhereEnd
 
+    ; Mod the vanilla vertical scrolling routines, so that all they do is draw the top layer and return
+    org $80AF06 : NOP #2    ;) Down
+    org $80AF42 : PLX : CLC : RTS ;/
+    org $80AF8D : NOP #2    ;) Up
+    org $80AFC9 : PLX : CLC : RTS ;/
+
+
     org $80AD1D
     DrawTopRowOfScreenForUpwardsTransition: {
-            STZ $0925 ; Door transition frame counter = 0
-            
-            ; these are the important bit?
-            JSR $A4BB ; Calculate BG and layer position blocks
-            JSR $AE10 ; Update previous layer blocks
-            
-            INC $0901 ; Increment previous layer 1 Y block
-            INC $0905 ; Increment previous layer 2 Y block
             JSR $AF89 ; Door transition scrolling - up
-            ; TODO - THIS IS STILL CALLING INTO THE UP DOOR SCROLLING ROUTINE (!!!)
+            RTL
+    }
+    DrawTopRowOfScreenForDownwardsTransition: {
+            JSR $AF02 ; Door transition scrolling - down
             RTL
     }
     warnpc $80AD30
