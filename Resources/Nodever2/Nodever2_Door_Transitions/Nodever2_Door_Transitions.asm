@@ -1,17 +1,15 @@
 lorom
 
-; todo: dont call the vanilla up scroll routine blindly lol
+; todo:
 ; fix bg2 position ?
-; obv fix vertical door gap
 ; test doors on screen edges / etc - basically "door glitch fix" patch should either be compatible with mine or my code should also have that bug fixed
-; can still have bugs esp if you enter a door too high - see transition from above into pre status hallway room (the one with missile pirates)
 ; also I think that maxspeed isn't strictly obeyed and the game can *technically* exceed it as it continues to accelerate for 1 frame past it. if you have high accel values this is a problem right?
+; doors can still snap into place on any speed value when aligning - state 7 is an example
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
 
-; So far, only transitions with Samus moving from left to right and right to left are modified. And only the speed of the scrolling is changed.
-; There are a lot more edits I'd like to do... Namely - Figure out a way to load music in the background(?) and start doing so while the door is scrolling(?), align the screen during the fadeout, remove any 1 frame delays between door state machine states.
+; There are a lot more edits I'd like to do... Namely - Figure out a way to load music in the background(?) and start doing so while the door is scrolling(?), remove any 1 frame delays between door state machine states.
 ; When I release this, release presets: same speed as vanilla, and faster (my preferred settings)
 
 ; When I'm done i'd like to showcase the following patches side by side: the 3 variations of mine, vanilla, project base, redesign, and the kazuto hex tweaks.
@@ -28,8 +26,6 @@ lorom
     ; Constants - feel free to edit these
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
-    !Freespace80           = $80CD8E
-    !Freespace80End        = $80FFC0
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !CameraAcceleration    = #$0001
     !CameraSubAcceleration = #$0000
@@ -52,7 +48,6 @@ lorom
 
     ; Constants - don't touch
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
-    !Freespace80ReportStart       := !Freespace80
 
     ; Vanilla variables
     !RamDoorTransitionFunctionPointer = $099C
@@ -131,6 +126,25 @@ lorom
 {
     org $82E309 : LDA #$E353 ; skip door transition function scroll screen to alignment phase - we now align screen during main scrolling
 
+    org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; This was necessary for vertical doors moving upwards to render the top row of tiles. For some reason.
+
+    ; Mod the vanilla main vertical scrolling routines, so that all they do is draw the top row of tiles and return - now they are just used once each for setup
+    org $80AF06 : NOP #2          ; Down
+    org $80AF42 : PLX : CLC : RTS : VanillaDownScrollingRoutineEnd:
+    org $80AF8D : NOP #2          ; Up
+    org $80AFC9 : PLX : CLC : RTS : VanillaUpScrollingRoutineEnd:
+
+    org $80AD1D
+    DrawTopRowOfScreenForUpwardsTransition: {
+            JSR $AF89 ; Vanlla door transition scrolling - up
+            RTL
+    }
+    DrawTopRowOfScreenForDownwardsTransition: {
+            JSR $AF02 ; Vanilla door transition scrolling - down
+            RTL
+    }
+    warnpc $80AD30
+
     org $80AD30
     DoorTransitionScrollingSetup: {
             REP #$30
@@ -151,7 +165,7 @@ lorom
     org $80ADC8 : JSR DoorTransitionScrollingVerticalSetup   ;) Up
     org $80AE04 : JSR SetupScrolling                         ;/
 
-    org !Freespace80
+    org VanillaDownScrollingRoutineEnd ; newly free space
     DoorTransitionScrollingHorizontalSetup: {
             LDA !RamLayer1XDestination : STA !RamLayer1XPosition ; This is what vanilla does
 
@@ -161,8 +175,11 @@ lorom
         +   PLA : STA !RamLayer1YPosition
             JSR $A2F9 ; Instruction replaced by hijack
             RTS
+        .freespace
     }
+    warnpc $80AF89
 
+    org VanillaUpScrollingRoutineEnd ; newly free space
     DoorTransitionScrollingVerticalSetup: {
             LDA !RamLayer1YDestination : STA !RamLayer1YPosition ; This is what vanilla does
 
@@ -173,7 +190,7 @@ lorom
             JSR $A2F9 ; Instruction replaced by hijack
             RTS
     }
-
+    
     SetupScrolling: {
             PHP : REP #$30
             LDA !RamLayer1XPosition : STA !RamLayer1XStartPos
@@ -181,46 +198,12 @@ lorom
             LDA #$0000
             STA !RamCameraXSpeed : STA !RamCameraXSubSpeed : STA !RamCameraXState : STA !RamLayer1XSubPosition
             STA !RamCameraYSpeed : STA !RamCameraYSubSpeed : STA !RamCameraYState : STA !RamLayer1YSubPosition
-            JSR MainScrollingRoutine ; Instruction replaced by hijack (effectively)
+            JSR MainScrollingRoutine ; Instruction replaced by hijack (effectively) - Run main scrolling routine once
             PLP : RTS
         .freespace
     }
-    !Freespace80 := SetupScrolling_freespace
-    warnpc !Freespace80End
+    warnpc $80B032
 }
-
-; patching $80A3DF to handle horizontal scrolling when the screen is at a negative Y pos. (this took a ton of digging to figure out that this was the problem and solution... heh...)
-; layer 1
-org $80A407
-    LDY $0909 : LDA $08F9 : JSR SetLayerYBlockHandleNegative
-    JSR $A9DB : BRA +
-warnpc $80A416
-org $80A416 : +
-
-; layer 2
-org $80A43F
-    LDY $090D : LDA $08FD : JSR SetLayerYBlockHandleNegative
-    JSR $A9D6 : BRA +
-warnpc $80A44E
-org $80A44E : +
-
-org !Freespace80
-; A: Layer 1/2 Y block
-; Y: BG1/2 Y block
-; PSR.N flag: Set based on A
-SetLayerYBlockHandleNegative: {
-        BPL +
-        LDA #$0000 : STA $0992 : STA $0996 : RTS
-    +   STA $0992 : TYA : STA $0996 : RTS
-    .freespace
-}
-
-    !Freespace80 := SetLayerYBlockHandleNegative_freespace
-    warnpc !Freespace80End
-
-
-; This was necessary for vertical doors moving upwards to render the top row of tiles. For some reason.
-org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; up
 
 ; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
@@ -408,24 +391,40 @@ org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; up
     }
     !FreespaceAnywhere := ScrollCamera_freespace
     warnpc !FreespaceAnywhereEnd
+}
 
-    ; Mod the vanilla vertical scrolling routines, so that all they do is draw the top layer and return
-    org $80AF06 : NOP #2    ;) Down
-    org $80AF42 : PLX : CLC : RTS ;/
-    org $80AF8D : NOP #2    ;) Up
-    org $80AFC9 : PLX : CLC : RTS ;/
+; =============================================================
+; ============== SUPER METROID SCROLLING ROUTINE ==============
+; =============================================================
+{
+    ; Need to patch $80A3DF to handle horizontal scrolling when the screen is at a negative Y pos.
+    ; (this took a ton of digging to figure out that this was the problem and solution... heh...)
 
-
-    org $80AD1D
-    DrawTopRowOfScreenForUpwardsTransition: {
-            JSR $AF89 ; Door transition scrolling - up
-            RTL
+    ; layer 1
+    org $80A407
+        LDY $0909 : LDA $08F9 : JSR SetLayerYBlockHandleNegative
+        JSR $A9DB : BRA +
+    warnpc $80A416
+    org $80A416 : +
+    
+    ; layer 2
+    org $80A43F
+        LDY $090D : LDA $08FD : JSR SetLayerYBlockHandleNegative
+        JSR $A9D6 : BRA +
+    warnpc $80A44E
+    org $80A44E : +
+    
+    org DoorTransitionScrollingHorizontalSetup_freespace ; newly free space
+    ; A: Layer 1/2 Y block
+    ; Y: BG1/2 Y block
+    ; PSR.N flag: Set based on A
+    SetLayerYBlockHandleNegative: {
+            BPL +
+            LDA #$0000 : STA $0992 : STA $0996 : RTS
+        +   STA $0992 : TYA : STA $0996 : RTS
+        .freespace
     }
-    DrawTopRowOfScreenForDownwardsTransition: {
-            JSR $AF02 ; Door transition scrolling - down
-            RTL
-    }
-    warnpc $80AD30
+    warnpc $80AF89
 }
 
 ; ======================================================================
@@ -515,11 +514,7 @@ org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; up
         org !RamEnd           : print "  First free RAM byte after RAM Usage: $", pc
         org !RamEnd-!RamStart : print "  RAM bytes used:                     0x", pc
         print "Freespace usage:"
-        print "  Bank $80:"
-        org !Freespace80ReportStart              : print "    First used byte:             $", pc
-        org !Freespace80                         : print "    First free byte after usage: $", pc
-        org !Freespace80-!Freespace80ReportStart : print "    Bytes used:                 0x", pc
-        print "  Anywhere:"
+        print "  Any Bank $80-$BF:"
         org !FreespaceAnywhereReportStart                    : print "    First used byte:             $", pc
         org !FreespaceAnywhere                               : print "    First free byte after usage: $", pc
         org !FreespaceAnywhere-!FreespaceAnywhereReportStart : print "    Bytes used:                 0x", pc
