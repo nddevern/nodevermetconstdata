@@ -195,10 +195,10 @@ org $80A407
 warnpc $80A416
 org $80A416 : +
 
-; layer 2 - todo this may not have worked, see tourian shaft save station transition
+; layer 2
 org $80A43F
     LDY $090D : LDA $08FD : JSR SetLayerYBlockHandleNegative
-    JSR $A9DB : BRA +
+    JSR $A9D6 : BRA +
 warnpc $80A44E
 org $80A44E : +
 
