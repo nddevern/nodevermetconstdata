@@ -24,6 +24,8 @@ lorom
 ; =================================================
 {
     ; Constants - feel free to edit these
+    !Freespace80           = $80CD8E
+    !Freespace80End        = $80FFC0
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
@@ -32,6 +34,7 @@ lorom
     !CameraMaxSpeed        = #$000F  ; Should be 000F or less.
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
     !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
+    !VanillaCode                = 0  ; Set to 0 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
     ; Vanilla-like settings:
     ; When these settings are used, the door transition takes almost exactly as long as vanilla.
@@ -93,6 +96,8 @@ lorom
     !RamCameraYSubSpeed                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYState                             := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYDistanceTraveledWhileAccelerating := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
 
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
@@ -120,6 +125,7 @@ lorom
     org $82D961 : LDA !ScreenFadeDelay
 }
 
+if !VanillaCode == 0
 ; ===================================================
 ; ============== DOOR TRANSITION SETUP ==============
 ; ===================================================
@@ -148,6 +154,7 @@ lorom
     org $80AD30
     DoorTransitionScrollingSetup: {
             REP #$30
+            JSR InitializeLayer2Destinations ; This overwrites layer 1 positions but those will be corrected immediately after this
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
             JSR ($AE08,x) : RTL
     }
@@ -167,7 +174,7 @@ lorom
 
     org VanillaDownScrollingRoutineEnd ; newly free space
     DoorTransitionScrollingHorizontalSetup: {
-            LDA !RamLayer1XDestination : STA !RamLayer1XPosition ; This is what vanilla does
+            LDA !RamLayer1XDestination : STA !RamLayer1XPosition ; This is what vanilla does - we will later offset this after returning
 
             LDA !RamLayer1YPosition : AND #$00FF : CLC : ADC !RamLayer1YDestination : PHA
             LDA !RamLayer1YPosition-1 : BIT #$FF00 : BPL +
@@ -181,7 +188,7 @@ lorom
 
     org VanillaUpScrollingRoutineEnd ; newly free space
     DoorTransitionScrollingVerticalSetup: {
-            LDA !RamLayer1YDestination : STA !RamLayer1YPosition ; This is what vanilla does
+            LDA !RamLayer1YDestination : STA !RamLayer1YPosition ; This is what vanilla does - we will later offset this after returning
 
             LDA !RamLayer1XPosition : AND #$00FF : CLC : ADC !RamLayer1XDestination : PHA
             LDA !RamLayer1XPosition-1 : BIT #$FF00 : BPL +
@@ -203,7 +210,27 @@ lorom
         .freespace
     }
     warnpc $80B032
+
+    org !Freespace80
+    InitializeLayer2Destinations: {
+            LDA !RamLayer1XPosition : PHA
+            LDA !RamLayer1YPosition : PHA
+            LDA !RamLayer1XDestination : STA !RamLayer1XPosition
+            LDA !RamLayer1YDestination : STA !RamLayer1YPosition
+            JSR CalculateLayer2Position
+            LDA !RamLayer2XPosition : STA !RamLayer2XDestination
+            LDA !RamLayer2YPosition : STA !RamLayer2YDestination
+            PLA : STA !RamLayer1YPosition
+            PLA : STA !RamLayer1XPosition
+            RTS
+        .freespace
+    }
+    !Freespace80 := InitializeLayer2Destinations_freespace
+    warnpc !Freespace80End
+    
 }
+
+org $80AE3B : RTS ; ?
 
 ; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
@@ -218,7 +245,6 @@ lorom
 
             BNE +
             LDA !RamDoorDirection : AND #$0003 : CMP #$0002 : BNE +
-            JSR CalculateLayer2Position
             ; Seemingly, if we run this, we need to return and wait for next frame to actually scroll.
             ; Seems like the engine can only DMA 1 horizontal row of tiles onto the screen per frame.
             ; $0968 was getting overwritten when I tried to continue after this call. $808DAC executes the DMA.
@@ -228,7 +254,6 @@ lorom
             JSL ScrollCameraX : PHP
             JSL ScrollCameraY : PHP
 
-            JSR CalculateLayer2Position
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
             LDA $02,s : TAX : INX : STX !RamDoorTransitionFrameCounter
             PLP : BCC +
@@ -253,8 +278,10 @@ lorom
     ScrollCameraX: {
             LDA !RamCameraXState : CMP #$0003 : BNE +
             SEC : RTL
-
-        +   LDA #$0000 : PHA ; tInvertDirectionFlag = right
+        +   
+            LDA !RamLayer2XDestination : PHA
+            LDA !RamLayer2XPosition : PHA
+            LDA #$0000 : PHA ; tInvertDirectionFlag = right
             LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XPosition : BPL +
             PLA : INC : PHA ; left
         +   LDA !RamLayer1XDestination : PHA
@@ -273,16 +300,20 @@ lorom
             PLA : STA !RamLayer1XSubPosition
             PLA : STA !RamCameraXDistanceTraveledWhileAccelerating
             PLA : STA !RamLayer1XPosition
-            PLA : STA !RamLayer1XDestination
+            PLA ;: STA !RamLayer1XDestination
             PLA ; tInvertDirectionFlag
+            PLA : STA !RamLayer2XPosition
+            PLA ; !RamLayer2XDestination
             RTL
     }
     
     ScrollCameraY: {
             LDA !RamCameraYState : CMP #$0003 : BNE +
             SEC : RTL
-
-        +   LDA #$0000 : PHA ; tInvertDirectionFlag = down
+        +
+            LDA !RamLayer2YDestination : PHA
+            LDA !RamLayer2YPosition : PHA
+            LDA #$0000 : PHA ; tInvertDirectionFlag = down
             LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YPosition : BPL +
             PLA : INC : PHA ; up
         +   LDA !RamLayer1YDestination : PHA
@@ -301,8 +332,10 @@ lorom
             PLA : STA !RamLayer1YSubPosition
             PLA : STA !RamCameraYDistanceTraveledWhileAccelerating
             PLA : STA !RamLayer1YPosition
-            PLA : STA !RamLayer1YDestination
+            PLA ;: STA !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
+            PLA : STA !RamLayer2YPosition
+            PLA ; !RamLayer2YDestination
             RTL
     }
 
@@ -319,6 +352,8 @@ lorom
         ; $0D,s: tLayer1Position
         ; $0F,s: tLayer1Destination
         ; $11,s: tInvertDirectionFlag ; 0 for door moving right or down, nonzero for door moving left or up
+        ; $13,s: tLayer2Position
+        ; $15,s: tLayer2Destination
 
         ; These defines account for the return addr on the stack, as well as PHP : PHX : PHA
         !tBaseStackOffset #= 1+2+1+2+2 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha
@@ -331,6 +366,8 @@ lorom
         !tLayer1Position                          = !tBaseStackOffset+12,s : !tLayer1PositionAfterPha = !tBaseStackOffset+14,s
         !tLayer1Destination                       = !tBaseStackOffset+14,s
         !tInvertDirectionFlag                     = !tBaseStackOffset+16,s
+        !tLayer2Position                          = !tBaseStackOffset+18,s
+        !tLayer2Destination                       = !tBaseStackOffset+20,s
 
             PHP : PHX : PHA
             REP #$30
@@ -370,11 +407,13 @@ lorom
             LDA !tInvertDirectionFlag : BNE ..invert
             LDA !tLayer1SubPosition : CLC : ADC !tCameraSubSpeed : STA !tLayer1SubPosition
             LDA !tLayer1Position : ADC !tCameraSpeed : STA !tLayer1Position
+            LDA !tLayer2Position : ADC !tCameraSpeed : STA !tLayer2Position
             BRA +
         ..invert
             LDA !tLayer1SubPosition : SEC : SBC !tCameraSubSpeed : STA !tLayer1SubPosition
             LDA !tLayer1Position : SBC !tCameraSpeed : STA !tLayer1Position
-        +   
+            LDA !tLayer2Position : SBC !tCameraSpeed : STA !tLayer2Position
+        +
         .checkStop
             ; check if we need to stop
             LDA !tInvertDirectionFlag : BNE ..invert
@@ -386,6 +425,7 @@ lorom
         .stop
             LDA #$0003 : STA !tCameraState ; camera state = stop
             LDA !tLayer1Destination : STA !tLayer1Position
+            LDA !tLayer2Destination : STA !tLayer2Position
             PLA : PLX : PLP : SEC : RTS
         .freespace
     }
@@ -520,6 +560,6 @@ lorom
         org !FreespaceAnywhere-!FreespaceAnywhereReportStart : print "    Bytes used:                 0x", pc
     endif
 }
-
+endif
 ; For years, I've feared the door transitions.
 ; Now, door transitions fear me.
