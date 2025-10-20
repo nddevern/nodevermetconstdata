@@ -218,11 +218,15 @@ if !VanillaCode == 0
 
     org !Freespace80
     InitializeLayer2Destinations: {
+        ; layer 1 positions have not been set yet (!)
+        ; ideally we need to call this after layer 1 destinations have been set
             LDA !RamLayer1XPosition : PHA
             LDA !RamLayer1YPosition : PHA
             LDA !RamLayer1XDestination : STA !RamLayer1XPosition
             LDA !RamLayer1YDestination : STA !RamLayer1YPosition
-            JSR CalculateLayer2Position
+            LDA !RamDoorDirection : AND #$0003 : CMP #$0003 : BNE +
+            LDA $80ADEF+1 : CLC : ADC !RamLayer1YPosition : STA !RamLayer1YPosition ; I hate vertical doors
+        +   JSR CalculateLayer2Position
             LDA !RamLayer2XPosition : STA !RamLayer2XDestination
             LDA !RamLayer2YPosition : STA !RamLayer2YDestination
             PLA : STA !RamLayer1YPosition
