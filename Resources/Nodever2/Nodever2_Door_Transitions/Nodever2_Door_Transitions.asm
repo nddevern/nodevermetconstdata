@@ -1,10 +1,13 @@
 lorom
 
 ; todo:
-; fix bg2 position ?
 ; test doors on screen edges / etc - basically "door glitch fix" patch should either be compatible with mine or my code should also have that bug fixed
 ; also I think that maxspeed isn't strictly obeyed and the game can *technically* exceed it as it continues to accelerate for 1 frame past it. if you have high accel values this is a problem right?
 ; doors can still snap into place on any speed value when aligning - state 7 is an example
+; testing - ceres broke when leaving ridleys room and running through the hallway after
+; softlock when going into mockball room for early supers
+; library bg snapping when exiting space pirate shaft
+; I'd also like to see if there's anything I can do about the black lines that show when the door is moving... most prevalent in vertical doors
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
@@ -142,10 +145,12 @@ if !VanillaCode == 0
 
     org $80AD1D
     DrawTopRowOfScreenForUpwardsTransition: {
+            STZ !RamDoorTransitionFrameCounter
             JSR $AF89 ; Vanlla door transition scrolling - up
             RTL
     }
     DrawTopRowOfScreenForDownwardsTransition: {
+            STZ !RamDoorTransitionFrameCounter
             JSR $AF02 ; Vanilla door transition scrolling - down
             RTL
     }
@@ -230,8 +235,6 @@ if !VanillaCode == 0
     
 }
 
-org $80AE3B : RTS ; ?
-
 ; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
 ; =======================================================
@@ -241,26 +244,26 @@ org $80AE3B : RTS ; ?
     org $80AE7E
     ; Called every frame during main scrolling.
     MainScrollingRoutine: {
-            LDX !RamDoorTransitionFrameCounter : PHX
+            LDA !RamDoorTransitionFrameCounter
 
             BNE +
             LDA !RamDoorDirection : AND #$0003 : CMP #$0002 : BNE +
             ; Seemingly, if we run this, we need to return and wait for next frame to actually scroll.
             ; Seems like the engine can only DMA 1 horizontal row of tiles onto the screen per frame.
             ; $0968 was getting overwritten when I tried to continue after this call. $808DAC executes the DMA.
-            JSL DrawTopRowOfScreenForDownwardsTransition : PLX : INX : STX !RamDoorTransitionFrameCounter : CLC : RTS
+            JSL DrawTopRowOfScreenForDownwardsTransition : INC !RamDoorTransitionFrameCounter : CLC : RTS
         +
 
             JSL ScrollCameraX : PHP
             JSL ScrollCameraY : PHP
 
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
-            LDA $02,s : TAX : INX : STX !RamDoorTransitionFrameCounter
+            INC !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; ; why do we call this twice? didn't really observe any effects from commenting this out (yet)
-            PLX : SEC : RTS
-        +   PLP : ++ : PLX : CLC : RTS
+            SEC : RTS
+        +   PLP : ++ : CLC : RTS
     }
 
     CalculateLayer2Position: {
@@ -292,7 +295,7 @@ org $80AE3B : RTS ; ?
             LDA !RamCameraXSubSpeed : PHA
             LDA !RamCameraXSpeed : PHA
             LDA !RamLayer1XStartPos : PHA
-            JSR ScrollCamera
+            JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
             PLA ;: STA !RamLayer1XStartPos; no need to write back
             PLA : STA !RamCameraXSpeed
             PLA : STA !RamCameraXSubSpeed
@@ -324,7 +327,7 @@ org $80AE3B : RTS ; ?
             LDA !RamCameraYSubSpeed : PHA
             LDA !RamCameraYSpeed : PHA
             LDA !RamLayer1YStartPos : PHA
-            JSR ScrollCamera
+            JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
             PLA ;: STA !RamLayer1YStartPos; no need to write back
             PLA : STA !RamCameraYSpeed
             PLA : STA !RamCameraYSubSpeed
@@ -372,7 +375,11 @@ org $80AE3B : RTS ; ?
             PHP : PHX : PHA
             REP #$30
 
-            LDA !tCameraState : ASL : TAX : JMP (.cameraStateHandlers,x)
+            ; Failsafe: If the scrolling has taken this long, we may be softlocked. End it here.
+            LDA !RamDoorTransitionFrameCounter : CMP.w #10*60 : BMI + ; 10 seconds
+            LDA #$0003 : STA !tCameraState
+
+        +   LDA !tCameraState : ASL : TAX : JMP (.cameraStateHandlers,x)
         .cameraStateHandlers:
             dw .accelerate, .move, .decelerate, .stop
 
@@ -380,9 +387,9 @@ org $80AE3B : RTS ; ?
             ; first check if camera needs to be accelerated
         .accelerate
             LDA !tCameraSpeed : CMP !CameraMaxSpeed : BPL ..stopAccelerating
-            LDA !tLayer1Destination : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
-            LSR : PHA : LDA !tLayer1PositionAfterPha : SEC : SBC !tLayer1StartPosAfterPha : BPL +++ : EOR #$FFFF : INC : +++
-            CMP $01,s : BPL ..stopAcceleratingWithPull : PLA ; stop accelerating if we're over halfway
+            LDA !tLayer1Destination : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC
+        +++ LSR : PHA : LDA !tLayer1PositionAfterPha : SEC : SBC !tLayer1StartPosAfterPha : BPL +++ : EOR #$FFFF : INC
+        +++ CMP $01,s : BPL ..stopAcceleratingWithPull : PLA ; stop accelerating if we're over halfway
             LDA !CameraSubAcceleration : CLC : ADC !tCameraSubSpeed : STA !tCameraSubSpeed ; continue accelerating
             LDA !CameraAcceleration : ADC !tCameraSpeed : STA !tCameraSpeed
             BRA .setPosition
@@ -390,12 +397,13 @@ org $80AE3B : RTS ; ?
             PLA
         ..stopAccelerating
             LDA !tCameraState : INC : STA !tCameraState
-            LDA !tLayer1Position : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC : +++
-            STA !tCameraDistanceTraveledWhileAccelerating
+            LDA !tLayer1Position : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC
+        +++ STA !tCameraDistanceTraveledWhileAccelerating
         .move
             ; first, check if we need to start declerating
-            LDA !tLayer1Destination : SEC : SBC !tLayer1Position : BPL +++ : EOR #$FFFF : INC : +++
-            CMP !tCameraDistanceTraveledWhileAccelerating
+            LDA !tCameraSubSpeed : BNE + : LDA !tCameraSpeed : BEQ .stop ; If we got here with speed of 0, stop this madness. (prevents possible softlock)
+        +   LDA !tLayer1Destination : SEC : SBC !tLayer1Position : BPL +++ : EOR #$FFFF : INC
+        +++ CMP !tCameraDistanceTraveledWhileAccelerating
             BEQ + : BPL .setPosition
             ; start decelerating
         +   LDA !tCameraState : INC : STA !tCameraState
@@ -407,12 +415,12 @@ org $80AE3B : RTS ; ?
             LDA !tInvertDirectionFlag : BNE ..invert
             LDA !tLayer1SubPosition : CLC : ADC !tCameraSubSpeed : STA !tLayer1SubPosition
             LDA !tLayer1Position : ADC !tCameraSpeed : STA !tLayer1Position
-            LDA !tLayer2Position : ADC !tCameraSpeed : STA !tLayer2Position
+            LDA !tLayer2Position : CLC : ADC !tCameraSpeed : STA !tLayer2Position
             BRA +
         ..invert
             LDA !tLayer1SubPosition : SEC : SBC !tCameraSubSpeed : STA !tLayer1SubPosition
             LDA !tLayer1Position : SBC !tCameraSpeed : STA !tLayer1Position
-            LDA !tLayer2Position : SBC !tCameraSpeed : STA !tLayer2Position
+            LDA !tLayer2Position : SEC : SBC !tCameraSpeed : STA !tLayer2Position
         +
         .checkStop
             ; check if we need to stop
