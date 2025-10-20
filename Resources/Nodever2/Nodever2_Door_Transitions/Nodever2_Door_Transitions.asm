@@ -218,8 +218,6 @@ if !VanillaCode == 0
 
     org !Freespace80
     InitializeLayer2Destinations: {
-        ; layer 1 positions have not been set yet (!)
-        ; ideally we need to call this after layer 1 destinations have been set
             LDA !RamLayer1XPosition : PHA
             LDA !RamLayer1YPosition : PHA
             LDA !RamLayer1XDestination : STA !RamLayer1XPosition
