@@ -5,7 +5,6 @@ lorom
 ; also I think that maxspeed isn't strictly obeyed and the game can *technically* exceed it as it continues to accelerate for 1 frame past it. if you have high accel values this is a problem right?
 ; doors can still snap into place on any speed value when aligning - state 7 is an example
 ; testing - ceres broke when leaving ridleys room and running through the hallway after
-; testing - also broke the screen when leaving early supers room in much the same way.
 ; I'd also like to see if there's anything I can do about the black lines that show when the door is moving... most prevalent in vertical doors
 
 ; Nodever2's door transitions
@@ -105,6 +104,8 @@ lorom
     !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
 
+    !RamSkipScrollingFlag                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
 }
@@ -129,6 +130,41 @@ lorom
     endif
 
     org $82D961 : LDA !ScreenFadeDelay
+
+    if !VanillaCode == 0
+    org $82E22A
+    {
+            NOP : NOP ; BEQ $03
+            JMP SetSkipScrollingFlag
+            JSR SetSkipScrollingFlag_InstructionsReplacedByHijack
+    }
+
+    org !Freespace82
+    SetSkipScrollingFlag: {
+            LDA #$0001 : STA !RamSkipScrollingFlag
+            JMP $E26B
+
+        .InstructionsReplacedByHijack
+            LDA #$0000 : STA !RamSkipScrollingFlag
+            LDA $C028 : STA $C228 : RTS
+        .freespace
+    }
+    !Freespace82 := SetSkipScrollingFlag_freespace
+    warnpc !Freespace82End
+
+    org $809636 : JSR SetForcedBlankIfNeeded
+    org $809668 : JSR SetForcedBlankIfNeeded
+    org !Freespace80
+    SetForcedBlankIfNeeded: {
+        PHA
+        LDA !RamSkipScrollingFlag : BNE +
+        STA $2100 ; set forced blank
+    +   PLA : RTS
+        .freespace
+    }
+    !Freespace80 := SetForcedBlankIfNeeded_freespace
+    warnpc !Freespace80End
+    endif
 }
 
 if !VanillaCode == 0
@@ -249,7 +285,26 @@ if !VanillaCode == 0
     org $80AE7E
     ; Called every frame during main scrolling. Returns carry set when done.
     MainScrollingRoutine: {
-            LDA !RamDoorTransitionFrameCounter
+            LDA !RamSkipScrollingFlag : BEQ +
+
+            ; Teleport the screen and finish scrolling instantly
+            PHP
+            SEP #$30
+            LDA #$8F : STA $2100 ;enable f-blank
+            REP #$30
+            INC !RamDoorTransitionFrameCounter
+            LDA !RamLayer1XDestination : STA !RamLayer1XPosition
+            LDA !RamLayer1YDestination : STA !RamLayer1YPosition
+            LDA !RamLayer2XDestination : STA !RamLayer2XPosition
+            LDA !RamLayer2YDestination : STA !RamLayer2YPosition
+            JSR CalculateLayer2Position
+            JSR $A37B ; Calculate BG positions
+            JSL $80A176 ; Display the viewable part of the room
+            SEP #$30
+            LDA #$0F : STA $2100 ;disable fblank
+            PLP : SEC : RTS
+
+        +   LDA !RamDoorTransitionFrameCounter
 
             BNE +
             LDA !RamDoorDirection : AND #$0003 : CMP #$0002 : BNE +
