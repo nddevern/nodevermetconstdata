@@ -28,7 +28,7 @@ lorom
     ; Constants - feel free to edit these
     !Freespace80           = $80CD8E
     !Freespace80End        = $80FFC0
-    !Freespace82           = $82F70F
+    !Freespace82           = $82F70F ; keep in mind there is space at $E310 still
     !Freespace82End        = $82FFFF
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
@@ -112,13 +112,31 @@ lorom
 ; ====================================
 ; ============== NOTES  ==============
 ; ====================================
-; Door transition code is in $82
-; H Door transition starts at 94:93B8 (collision with door BTS) and starts with:
-;  !RamGameState = 9 (E169 - door transition - delay)
-;  !RamDoorTransitionFunctionPointer = E17D HandleElevator
-
-; PJ had a comment indicating that this might help in some way but so far I haven't seen a consequence for it.
-;org $80A44E : LDX #$0000
+{
+    ; Door transition code is in $82
+    ; H Door transition starts at 94:93B8 (collision with door BTS) and starts with:
+    ;  !RamGameState = 9 (E169 - door transition - delay)
+    ;  !RamDoorTransitionFunctionPointer = E17D HandleElevator
+    
+    ; PJ had a comment indicating that this might help in some way but so far I haven't seen a consequence for it.
+    ;org $80A44E : LDX #$0000
+    
+    ; more notes on scrolling routine
+    ; $08F7 - layer 1 X block
+    ; $0990 - blocks to update X block - this is the X coordinate of the column in layer 1 RAM we'll update. Basically just layer 1 X block, but if we're scrolling right, add 10h to it.
+    ; $0907 - BG1 X block. Current X coordinate in BG1, in blocks. Apparently this can just keep increasing. The actual X coordinate in the tilemap viewer is this % 20h in normal gameplay.
+    ; $0994 - Blocks to update X block. Basically just BG1 X block, but if we're scrolling right, it's BG1 X block + 10h.
+    
+    ; Y blocks work the same way. BG1 Y block % 10h unlike BG1 X block which is % 20h.
+    
+    ; it looks like BG1 X block got incremented while Layer1XBlock did not within a frame
+    ; This is because BG1XScroll and Layer1XPosition are out of sync by 1 pixel
+    ; $B1   - BG1 X Scroll (pixels)
+    ; $0911 - Layer 1 X position (pixels)
+    
+    ; so we recalculate BG1 X scroll based on layer 1 X pos every time we call the scrolling routine ($80A37B)
+    ; HOWEVER, the offset between the two ($091D) somehow ended up with a 1 in it
+}
 
 ; =======================================================
 ; ============== SCREEN FADE TO/FROM BLACK ==============
@@ -136,7 +154,22 @@ if !VanillaCode == 0
 ; ============== DOOR TRANSITION SETUP ==============
 ; ===================================================
 {
-    org $82E309 : LDA #$E353 ; skip door transition function scroll screen to alignment phase - we now align screen during main scrolling
+    ; skip door transition function scroll screen to alignment phase - we now align screen during main scrolling
+    org $82E30F
+    {
+    ; we still need to calculate BG scrolls because fucking earthquakes.
+    ; why this is needed:
+    ; earthquakes oscillate the BG1 X/Y scroll values
+    ; then in vanilla the screen scroll to alignment phase of door transitions is more than likely clearing out whatever offset it had from earthquakes
+    ; then when we recalculate scroll offset it's all good
+
+    ; but since I skipped the scroll to aligment phase...
+    ; when we recalculate offset between layer 1 pos and bg1 scroll ($80AE29), it has an extra 1 in there from earthquakes
+    ; which basically just fucks everything up, as if these are desynced we will get graphical glitches constantly
+    ; from loading in the wrong tiles...
+            JSR $A34E ; Calculate BG scrolls
+            LDA #$E353 : STA $099C : JMP $E353
+    }
 
     org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; This was necessary for vertical doors moving upwards to render the top row of tiles. For some reason.
 
