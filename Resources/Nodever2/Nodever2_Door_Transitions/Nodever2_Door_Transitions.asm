@@ -852,21 +852,52 @@ Done:
 warnpc !Freespace80End
 
 
-    org $82E664 ; beware, we've hijacked this in one other place but its commented out
-        JSL CheckIfDoorNeedsToWaitOnMusic
+    org $82E526 : JSR SetWaitForScrollingDoorTransitionFunction : RTS
+
+    ;org $82E664 ; beware, we've hijacked this in one other place but its commented out
+    ;    JSL CheckIfDoorNeedsToWaitOnMusic
 
 ;    org $82E72C : JSR DisableAsyncUploads
 
     org $82E17D : JSR InitializeMusicHandler
 
+    
+    ;org $82E16F : JSR RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction ; game state 9
+    org $82E28F : JMP RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction ; game state B
+
+    org $82E27C : LDA #$E2DB ; skip "wait for sounds to finish" - this will be handled by door transition music handler
+    org $82E4AD : NOP #4 ; this will be handled by door transition music handler
+    
+    org $82E664
+        LDA !RamMusicHandlerState : CMP #$0003 : BNE +
+        LDA #$E6A2 : STA $099C
+    +   RTS
+    warnpc $82E675
+
     org !Freespace82 
-    ; returns carry set if door needs to wait on music
-    CheckIfDoorNeedsToWaitOnMusic:
-            LDA !RamUploadingToApuFlag : BNE +
-            JSL $808EF4 : BCS + ; instruction replaced by hijack
-            LDA #$0000 : STA !RamEnableAsyncUploadsFlag
-            CLC : RTS
-        +   SEC : RTS
+    ; this allows us to still transfer music in background instead of sitting in the busy loop.
+    SetWaitForScrollingDoorTransitionFunction: {
+        LDA #WaitForScrollingFunction : STA $099C
+    }
+
+    WaitForScrollingFunction: {
+            LDA $0931 : BPL +
+            LDA #$E52B : STA $099C
+        +   RTS
+    }
+
+    RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction: {
+        JSR DoorTransitionMusicHandler
+        JMP ($099C) ; instruction replaced by hijack
+    }
+
+    ;; returns carry set if door needs to wait on music
+    ;CheckIfDoorNeedsToWaitOnMusic:
+    ;        LDA !RamUploadingToApuFlag : BNE +
+    ;        JSL $808EF4 : BCS + ; instruction replaced by hijack
+    ;        LDA #$0000 : STA !RamEnableAsyncUploadsFlag
+    ;        CLC : RTS
+    ;    +   SEC : RTS
 
 
 ;    DisableAsyncUploads:
@@ -887,17 +918,19 @@ warnpc !Freespace80End
             LDA $0E16 : RTS ; instruction replaced by hijack
     }
 
-    ; todo call this
+    
+
     DoorTransitionMusicHandler: {
         ;JSL $808F0C ; Handle music queue
-        LDA !RamUploadingToApuFlag : BEQ + : RTS
-    +   LDA !RamMusicHandlerState : BNE + : JSL $8289EF ; Handle sound effects if music handler state is 0
-    +   LDA !RamMusicHandlerState : JMP (.musicStateHandlers,x)
+        PHP : REP #$30
+        LDA !RamUploadingToApuFlag : BNE .return
+    +   LDA !RamMusicHandlerState ; : BNE + : JSL $8289EF ; Handle sound effects if music handler state is 0
+    +   LDA !RamMusicHandlerState : ASL : TAX : JMP (.musicStateHandlers,x)
         
         .musicStateHandlers
-            dw .waitForSounds, .waitUntilMusicIsNotQueued, .queueMusicTrack, .done
+            dw .waitForSoundsAndQueueMusic, .waitUntilMusicIsNotQueued, .queueMusicTrack, .done
 
-        .waitForSounds
+        .waitForSoundsAndQueueMusic
             PHP
             SEP #$20
             LDA $0646 : SEC : SBC $0643 : AND #$0F : BNE + ; If [sound 1 queue next index] - [sound 1 queue start index] & Fh != 0: return
@@ -905,22 +938,25 @@ warnpc !Freespace80End
             LDA $0648 : SEC : SBC $0645 : AND #$0F : BNE + ; If [sound 3 queue next index] - [sound 3 queue start index] & Fh != 0: return
             REP #$20
             LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-        +   PLP : RTS
+            JSL QueueDestinationRoomMusic ; Queue room music data
+        +   PLP : BRA .return
 
         .waitUntilMusicIsNotQueued
             JSL $808EF4 : BCS + ; Check if music is queued
             LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-            RTS
+        +   BRA .return
 
         .queueMusicTrack
             ; todo: follow door pointers to get music track data set up in RAM correctly before doing the rest of this
-            JSL $82E071 ; Queue room music data
             JSL $82E0D5 ; Load new music track if changed - I think this is supposed to be after we uhh
             LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-            RTS
+            BRA .return
 
         .done
-            RTS
+            LDA #$0000 : STA !RamEnableAsyncUploadsFlag
+
+        .return
+            PLP : RTS
 
         .freespace
     }
@@ -1043,29 +1079,29 @@ warnpc !Freespace80End
 ;   }
 ;   warnpc $82E353
 ;
-;   org !FreespaceAnywhere
-;   QueueDestinationRoomMusic: {
-;           PHP : PHB
-;           PEA $8383 : PLB : PLB ; DB = $83
-;           LDX $078D ; X = [door pointer]
-;           LDA $0000,x : TAX ; X = Room pointer (this would normally go in $079B)
-;           PEA $8F8F : PLB : PLB ; DB = $8F
-;           JSL $8FE5D2 ; Room state checking handler - issue: before calling this we need the area bit set accordingly, and whatever other states look at... Also, this modifies $07BB, todo back that up. TODO see what else it modifies.
-;           LDX $07BB ; X = room state pointer
-;           LDA $0004,x : AND #$00FF : STA $07CB ; Music data index = [[X] + 4]
-;           LDA $0005,x : AND #$00FF : STA $07C9 ; Music track index = [[X] + 5]
-;           JSL $82E071 ; Queue room music data
-;
-;           ; JSL $82E071 - queue room music data
-;           ;$82:E774 20 F1 DD    JSR $DDF1  [$82:DDF1]  ; Load destination room CRE bitset
-;           ;$82:E777 20 12 DE    JSR $DE12  [$82:DE12]  ; Load door header
-;           ;$82:E77A 20 6F DE    JSR $DE6F  [$82:DE6F]  ; Load room header
-;           ;$82:E77D 20 F2 DE    JSR $DEF2  [$82:DEF2]  ; Load state header
-;           PLB : PLP : RTL
-;       .freespace
-;   }
-;   !FreespaceAnywhere := QueueDestinationRoomMusic_freespace
-;   warnpc !FreespaceAnywhereEnd
+   org !FreespaceAnywhere
+   QueueDestinationRoomMusic: {
+           PHP : PHB
+           PEA $8383 : PLB : PLB ; DB = $83
+           LDX $078D ; X = [door pointer]
+           LDA $0000,x : TAX ; X = Room pointer (this would normally go in $079B)
+           PEA $8F8F : PLB : PLB ; DB = $8F
+           JSL $8FE5D2 ; Room state checking handler - issue: before calling this we need the area bit set accordingly, and whatever other states look at... Also, this modifies $07BB, todo back that up. TODO see what else it modifies.
+           LDX $07BB ; X = room state pointer
+           LDA $0004,x : AND #$00FF : STA $07CB ; Music data index = [[X] + 4]
+           LDA $0005,x : AND #$00FF : STA $07C9 ; Music track index = [[X] + 5]
+           JSL $82E071 ; Queue room music data
+
+           ; JSL $82E071 - queue room music data
+           ;$82:E774 20 F1 DD    JSR $DDF1  [$82:DDF1]  ; Load destination room CRE bitset
+           ;$82:E777 20 12 DE    JSR $DE12  [$82:DE12]  ; Load door header
+           ;$82:E77A 20 6F DE    JSR $DE6F  [$82:DE6F]  ; Load room header
+           ;$82:E77D 20 F2 DE    JSR $DEF2  [$82:DEF2]  ; Load state header
+           PLB : PLP : RTL
+       .freespace
+   }
+   !FreespaceAnywhere := QueueDestinationRoomMusic_freespace
+   warnpc !FreespaceAnywhereEnd
 
 
 }
