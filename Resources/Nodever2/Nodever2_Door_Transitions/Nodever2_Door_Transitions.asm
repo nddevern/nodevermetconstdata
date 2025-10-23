@@ -18,8 +18,13 @@ lorom
 ; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, misalignments, etc...
 
 ; by Nodever2 October 2025
+; Works with Asar (written with metconst fork of asar 1.90), won't work with xkas
 ; Please give credit if you use this patch.
-; Works with Asar (written with metconst fork of asar 1.90), probably won't work with xkas
+
+; This patch was also made possible by:
+;  * NobodyNada                       - Developer of asynchronous music transfer code
+;  * Kejardon, with bugfix from Maddo - Developer of Decompression Optimization
+;  * P.JBoy                           - Custodian of the commented Super Metroid bank logs
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -59,6 +64,8 @@ lorom
     !Freespace82ReportStart := !Freespace82
 
     ; Vanilla variables
+    !RamUploadingToApuFlag            = $0617 ; I am going to set to 0001 if an async upload is in progress.
+    !RamDisableSoundsFlag             = $05F5
     !RamDoorTransitionFunctionPointer = $099C
     !RamGameState                     = $0998
     !RamDoorTransitionFrameCounter    = $0925 ; for horizontal doors, 0 to !TransitionLength. vertical, 0 to !TransitionLength-1...
@@ -105,6 +112,17 @@ lorom
     !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
 
+    !RamMusicHandlerState                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamEnableAsyncUploadsFlag                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+
+    !RamSpcDB                                    := $9B ; 1 byte
+    !RamSpcData                                  := $9C ; 2 bytes
+    !RamSpcIndex                                 := $9E ; 1 byte
+    !RamSpcLength                                := $9F ; 2 bytes
+
+    !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; basically their state machine address\
+    !RamNmiCounter                               := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; ?
+
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
 }
@@ -117,25 +135,55 @@ lorom
     ; H Door transition starts at 94:93B8 (collision with door BTS) and starts with:
     ;  !RamGameState = 9 (E169 - door transition - delay)
     ;  !RamDoorTransitionFunctionPointer = E17D HandleElevator
-    
+
     ; PJ had a comment indicating that this might help in some way but so far I haven't seen a consequence for it.
     ;org $80A44E : LDX #$0000
-    
+
     ; more notes on scrolling routine
     ; $08F7 - layer 1 X block
     ; $0990 - blocks to update X block - this is the X coordinate of the column in layer 1 RAM we'll update. Basically just layer 1 X block, but if we're scrolling right, add 10h to it.
     ; $0907 - BG1 X block. Current X coordinate in BG1, in blocks. Apparently this can just keep increasing. The actual X coordinate in the tilemap viewer is this % 20h in normal gameplay.
     ; $0994 - Blocks to update X block. Basically just BG1 X block, but if we're scrolling right, it's BG1 X block + 10h.
-    
+
     ; Y blocks work the same way. BG1 Y block % 10h unlike BG1 X block which is % 20h.
-    
+
     ; it looks like BG1 X block got incremented while Layer1XBlock did not within a frame
     ; This is because BG1XScroll and Layer1XPosition are out of sync by 1 pixel
     ; $B1   - BG1 X Scroll (pixels)
     ; $0911 - Layer 1 X position (pixels)
-    
+
     ; so we recalculate BG1 X scroll based on layer 1 X pos every time we call the scrolling routine ($80A37B)
     ; HOWEVER, the offset between the two ($091D) somehow ended up with a 1 in it
+}
+
+; =======================================
+; ============== GAME INIT ==============
+; =======================================
+{
+    ; We need to initialize these ram values we are using on game start, as the game does not do this by default.
+    org $808432
+        JSR InitRamOnBoot
+
+    ORG $80A085
+        JSR InitRamOnGameStart
+
+    ORG !Freespace80
+    InitRamOnGameStart:
+        STZ $07E9 ; instruction replaced by hijack
+    InitRam:
+        PHP : REP #$30
+        PHA : PHX : LDA #$0000
+        LDX #!RamStart
+    -   STA !RamBank,x
+        INX : INX
+        CPX #!RamEnd : BMI -
+        PLX : PLA : PLP : RTS
+    InitRamOnBoot:
+        LDA #$0000 : TCD : PHK : PLB : SEP #$30 ; instruction replaced by hijack
+        BRA InitRam
+        .freespace
+    !Freespace80 := InitRamOnBoot_freespace
+    warnpc !Freespace80End
 }
 
 ; =======================================================
@@ -156,20 +204,22 @@ if !VanillaCode == 0
 {
     ; skip door transition function scroll screen to alignment phase - we now align screen during main scrolling
     org $82E30F
-    {
-    ; we still need to calculate BG scrolls because fucking earthquakes.
-    ; why this is needed:
-    ; earthquakes oscillate the BG1 X/Y scroll values
-    ; then in vanilla the screen scroll to alignment phase of door transitions is more than likely clearing out whatever offset it had from earthquakes
-    ; then when we recalculate scroll offset it's all good
+    DoorTransitionFunctionScrollScreenToAlignment: {
+        ; we still need to calculate BG scrolls because fucking earthquakes.
+        ; why this is needed:
+        ; earthquakes oscillate the BG1 X/Y scroll values
+        ; then in vanilla the screen scroll to alignment phase of door transitions is more than likely clearing out whatever offset it had from earthquakes
+        ; then when we recalculate scroll offset it's all good
 
-    ; but since I skipped the scroll to aligment phase...
-    ; when we recalculate offset between layer 1 pos and bg1 scroll ($80AE29), it has an extra 1 in there from earthquakes
-    ; which basically just fucks everything up, as if these are desynced we will get graphical glitches constantly
-    ; from loading in the wrong tiles...
+        ; but since I skipped the scroll to aligment phase...
+        ; when we recalculate offset between layer 1 pos and bg1 scroll ($80AE29), it has an extra 1 in there from earthquakes
+        ; which basically just fucks everything up, as if these are desynced we will get graphical glitches constantly
+        ; from loading in the wrong tiles...
             JSR $A34E ; Calculate BG scrolls
             LDA #$E353 : STA $099C : JMP $E353
+        .freespace
     }
+    warnpc $82E353
 
     org $80ADFB : DEC !RamPreviousLayer1YBlock : DEC !RamPreviousLayer2YBlock ; This was necessary for vertical doors moving upwards to render the top row of tiles. For some reason.
 
@@ -511,6 +561,513 @@ if !VanillaCode == 0
         .freespace
     }
     warnpc $80AF89
+}
+
+; ==================================================================
+; ============== DOOR TRANSITION LOADING - LOAD MUSIC ==============
+; ==================================================================
+{
+
+;10-22
+; I am going to expand the door transition game states to call a new handler for music queue
+; also going to break the state that has the busy loop up so it can actually return back to the state handler every frame
+
+; my new handler will (start out as) its own entire state machine 
+
+; todo NOP out all places in door transitions where we are currently handling music queue and sound effects
+
+; more notes:
+; looks like it's actually the music handler that handles spc uploads?
+; so it's the main game loop (the thing that actually calls each game state function) that calls
+; the music handler... ugh
+; so I guess I need to patch the main game loop or the music queue handler to have special behavior
+; when we're in a door transition...
+
+; thoughts:
+; update music queue handler to have 2 options
+; based on a memory address
+; 1: transfer music until NMI, then leave SPC hanging until next frame.
+; 2: transfer music until it is done.
+
+; for option 1, we'd also have to keep track of if we're done or not,
+; so that next frame when the music queue handler is called,
+; we don't actully mess with the music queue variables and instead
+; go straight back to working on transfering the music.
+
+; this sounds like hell.
+
+; TODO repoint these
+
+org $808F82
+    JSR CleanupOnlyIfNonAsyncStarted
+    PLP : RTL
+
+org $808F0F
+    JMP CheckIfHandleMusicQueue
+
+org $808340
+    JMP CustomRequestNmi
+
+
+org $808028
+    JSL CheckIfStartAsyncUpload
+
+org !Freespace80
+CleanupOnlyIfNonAsyncStarted:
+        LDA !RamUploadingToApuFlag : BNE +
+        JSL MusicQueueCleanupAfterTransfer
+    +   RTS
+
+MusicQueueCleanupAfterTransfer:
+print "MusicQueueCleanupAfterTransfer: ", pc
+        PHP
+        SEP #$20
+        STZ $064C   ; Current music track = 0
+        REP #$20
+        LDX $063B   ;\
+        STZ $0619,x ;) Music queue entries + [music queue start index] = 0
+        STZ $0629,x ; Music queue timer + [music queue start index] = 0
+        INX         ;\
+        INX         ;|
+        TXA         ;) Music queue start index = ([music queue start index] + 2) % 10h
+        AND #$000E  ;|
+        STA $063B   ;/
+        LDA #$0008  ;\
+        STA $0686   ;) Sound handler downtime = 8
+        PLP
+        RTL
+
+CheckIfHandleMusicQueue:
+    PHP : REP #$30
+    LDA !RamUploadingToApuFlag : BNE .skip
+    PLP
+    DEC $063F ; instruction replaced by hijack
+    JMP $8F12
+.skip
+    PLP : PLP : RTL
+
+CustomRequestNmi:
+    STA $05B4 ; nmi request flag = 1
+    LDA !RamUploadingToApuFlag : BNE +
+    JMP $8343 ; back to normal nmi routine
++   JMP WaitForNmiWhileTransferringData
+
+
+; Returns zero flag set if normal upload should continue, zero flag clear otherwise.
+CheckIfStartAsyncUpload:
+        LDA !RamUploadingToApuFlag : BEQ +
+        TDC : INC : DEC : RTL
+    +   LDA !RamEnableAsyncUploadsFlag : BNE +
+        LDA $808008 : RTL ; instruction replaced by hijack
+    +   PHP
+        SEP #$30
+        LDA $02 : STA !RamSpcDB
+        REP #$30
+        LDA $00 : STA !RamSpcData
+        LDA #SpcInit : STA !RamAsyncSpcState
+        LDA #$0001 : STA !RamUploadingToApuFlag ; Begin async upload
+        LDA #$FFFF : PLP : XBA : RTL
+
+
+
+
+; This is heavily based off of / copied from NobodyNada's work for the SM practice hack at https://github.com/tewtal/sm_practice_hack/blob/master/src/menu.asm
+; todo disable sounds during this time. todo initialize all of our ram variables.
+
+WaitForNmiWhileTransferringData:
+{
+    REP #$30
+    LDA !RamAsyncSpcState : TAX
+
+  .loop
+    LDA $05B4 : AND #$00FF ; NMI complete flag
+    BEQ .done
+
+    CPX #$0000 : BPL .loop
+    PHA : PHP : PHB : JSR JumpToX : PLB : PLP
+    LDA !RamAsyncSpcState : TAX : PLA
+    BRA .loop
+
+  .done
+    PLB : PLP
+    RTL
+}
+
+JumpToX:
+{
+    DEX : PHX
+    RTS
+}
+
+SpcInit:
+{
+    PHP
+    SEP #$20
+    REP #$10
+    LDA #$FF : STA $002140
+    PLP
+
+
+    ; wait for SPC to be ready
+    LDA #$BBAA : CMP $2140 : BNE .return
+
+    ; disable soft reset
+    ;LDA #$FFFF : STA !RamUploadingToApuFlag
+
+    SEP #$20
+    LDA #$CC : STA !RamSpcIndex
+
+    REP #$20
+    ;LDA #$CFCF : STA !RamSpcDB
+    ;LDA #$8000 : STA !RamSpcData
+
+    LDA.w #SpcNextBlock : STA !RamAsyncSpcState
+
+  .return
+    RTS
+}
+
+SpcNextBlock:
+{
+    SEP #$20
+    PHB : LDA !RamSpcDB : PHA : PLB
+    LDY !RamSpcData
+
+    ; Get block size
+    LDA #$01
+    LDX $0000,Y : BNE .not_last
+    LDA #$00
+
+  .not_last
+    INY : BNE .done_inc_bank_1
+    JSR SpcIncrementBank
+  .done_inc_bank_1
+    INY : BNE .done_inc_bank_2
+    JSR SpcIncrementBank
+  .done_inc_bank_2
+    STX !RamSpcLength
+
+    ; Get block address
+    LDX $0000,Y
+    INY : BNE .done_inc_bank_3
+    JSR SpcIncrementBank
+  .done_inc_bank_3
+    INY : BNE .done_inc_bank_4
+    JSR SpcIncrementBank
+  .done_inc_bank_4
+    PLB : STX $2142
+
+    STA $2141
+
+    STY !RamSpcData
+    REP #$20
+    LDA.w #SpcNextBlock_wait : STA !RamAsyncSpcState
+
+    RTS
+}
+
+SpcIncrementBank:
+{
+    PHA
+    LDA !RamSpcDB : INC : STA !RamSpcDB
+    PHA : PLB : PLA
+    LDY #$8000
+    RTS
+}
+
+SpcNextBlock_wait:
+{
+    SEP #$20
+    LDA !RamSpcIndex : STA $2140 : CMP $2140 : BNE .return
+
+    STZ !RamSpcIndex
+    REP #$20
+    LDA !RamSpcLength : BEQ .eof
+    LDA.w #SpcTransfer : STA !RamAsyncSpcState
+    RTS
+
+  .eof
+    TDC : STA !RamAsyncSpcState
+    STZ !RamDisableSoundsFlag : STZ !RamUploadingToApuFlag
+    JSL MusicQueueCleanupAfterTransfer
+
+  .return
+    RTS
+}
+
+SpcTransfer:
+{
+    ; Determine how many bytes to transfer
+    LDA !RamSpcLength : TAX
+    SBC #$0040 : BCC .last
+    LDX #$0040 : STA !RamSpcLength
+    BRA .setup
+
+  .last
+    STZ !RamSpcLength
+
+  .setup
+    SEP #$20
+    PHB : LDA !RamSpcDB : PHA : PLB
+    LDY !RamSpcData
+    LDA !RamSpcIndex
+    SEP #$20
+
+  .transfer_loop
+    XBA : LDA $0000,Y : XBA
+
+    REP #$20
+    STA $002140
+    SEP #$20
+
+  .wait_loop
+    CMP $002140 : BNE .wait_loop
+
+    INC
+    INY : BNE .done_inc_bank
+    JSR SpcIncrementBank
+  .done_inc_bank
+    DEX : BNE .transfer_loop
+
+    LDX !RamSpcLength : BNE .timeout
+    ; Done with the transfer!
+    CLC : ADC #$03 : STA !RamSpcIndex : STY !RamSpcData
+    REP #$20
+    LDA.w #SpcNextBlock : STA !RamAsyncSpcState
+
+    PLB
+    RTS
+
+  .timeout
+    STA !RamSpcIndex
+    STY !RamSpcData
+
+    PLB
+    RTS
+}
+
+Done:
+
+!Freespace80 := Done
+warnpc !Freespace80End
+
+
+    org $82E664 ; beware, we've hijacked this in one other place but its commented out
+        JSL CheckIfDoorNeedsToWaitOnMusic
+
+;    org $82E72C : JSR DisableAsyncUploads
+
+    org $82E17D : JSR InitializeMusicHandler
+
+    org !Freespace82 
+    ; returns carry set if door needs to wait on music
+    CheckIfDoorNeedsToWaitOnMusic:
+            LDA !RamUploadingToApuFlag : BNE +
+            JSL $808EF4 : BCS + ; instruction replaced by hijack
+            LDA #$0000 : STA !RamEnableAsyncUploadsFlag
+            CLC : RTS
+        +   SEC : RTS
+
+
+;    DisableAsyncUploads:
+;            STA $099C ; instruction replaced by hijack
+;            PHA : LDA #$0000 : STA !RamEnableAsyncUploadsFlag : PLA
+;            RTS
+
+    InitializeMusicHandler: { ; todo can this be moved out of this bank?
+            LDA #$0000
+            STA !RamMusicHandlerState
+            STA !RamSpcDB
+            STA !RamSpcData
+            STA !RamSpcIndex
+            STA !RamSpcLength
+            STA !RamAsyncSpcState
+            STA !RamNmiCounter
+            LDA #$0001 : STA !RamEnableAsyncUploadsFlag
+            LDA $0E16 : RTS ; instruction replaced by hijack
+    }
+
+    ; todo call this
+    DoorTransitionMusicHandler: {
+        ;JSL $808F0C ; Handle music queue
+        LDA !RamUploadingToApuFlag : BEQ + : RTS
+    +   LDA !RamMusicHandlerState : BNE + : JSL $8289EF ; Handle sound effects if music handler state is 0
+    +   LDA !RamMusicHandlerState : JMP (.musicStateHandlers,x)
+        
+        .musicStateHandlers
+            dw .waitForSounds, .waitUntilMusicIsNotQueued, .queueMusicTrack, .done
+
+        .waitForSounds
+            PHP
+            SEP #$20
+            LDA $0646 : SEC : SBC $0643 : AND #$0F : BNE + ; If [sound 1 queue next index] - [sound 1 queue start index] & Fh != 0: return
+            LDA $0647 : SEC : SBC $0644 : AND #$0F : BNE + ; If [sound 2 queue next index] - [sound 2 queue start index] & Fh != 0: return
+            LDA $0648 : SEC : SBC $0645 : AND #$0F : BNE + ; If [sound 3 queue next index] - [sound 3 queue start index] & Fh != 0: return
+            REP #$20
+            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
+        +   PLP : RTS
+
+        .waitUntilMusicIsNotQueued
+            JSL $808EF4 : BCS + ; Check if music is queued
+            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
+            RTS
+
+        .queueMusicTrack
+            ; todo: follow door pointers to get music track data set up in RAM correctly before doing the rest of this
+            JSL $82E071 ; Queue room music data
+            JSL $82E0D5 ; Load new music track if changed - I think this is supposed to be after we uhh
+            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
+            RTS
+
+        .done
+            RTS
+
+        .freespace
+    }
+    !Freespace82 := DoorTransitionMusicHandler_freespace
+    warnpc !Freespace82End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;lots of music change testing. starting to think the ideal way to do this would be another interrupt...
+;what I will say is that there is plenty of CPU time to spare during fade to black. we should be queueing the music earlier.
+
+; I actually think that if we queue the music earlier, we could finish the entire transfer in time...
+
+
+
+    ;org $82E4AD : NOP #4 ; remove the code that originally queued room music data
+
+;!!!!!
+    ;org $82E526 ; busy loop while waiting for scrolling
+    ;        JSR WaitForMusic
+    ;
+    ;org DoorTransitionFunctionScrollScreenToAlignment_freespace
+    ;WaitForMusic: {
+    ;        JSR WaitForMusic2
+    ;        JSL $808338 ; Wait for NMI
+    ;        LDA $0931 : RTS ; instruction replaced by hijack
+    ;    .freespace
+    ;}
+    ;warnpc $82E353
+;!!!!!
+
+
+    ; todo: $E29E should be the one to queue the music
+    ; the door transition game states also need to call the music queue handler
+    ; then we can continue to use the code above but not call the music queue handler from there (since it'll be done by the game state handlers)
+
+
+    ; note: music queue is supposed to be handled before sound effects (8089ef)
+    
+    
+    ;org $82E28F ; game state bh (door transition - main).
+    ;        JMP HandleMusicQueueAndExecuteFunction
+
+;!!!!!
+    ;org WaitForMusic_freespace
+    ;WaitForMusic2: {
+    ;        JSL $808EF4 : BCC + ; If music is queued:
+    ;        JSL $808F0C         ; Handle music queue and return
+    ;        RTS
+    ;    +   JSL $82E0D5 ; Load new music track if changed
+    ;        RTS
+    ;}
+;!!!!!
+
+    ;HandleMusicQueueAndExecuteFunction: {
+    ;        LDA $099C : CMP #$E29E : BEQ + ; If we're not done waiting for sounds to finish, skip music queue (is this needed?)
+    ;        JSR WaitForMusic2
+    ;    +   JMP ($099C) ; Execute door transition function
+    ;    .freespace
+    ;}
+    ;warnpc $82E353
+
+    ;org $82E3BC ; right after creating door interrupt
+    ;    JSR QueueMusic2
+
+   ;org HandleMusicQueueAndExecuteFunction_freespace
+   ;QueueMusic2: {
+   ;        STA $099C ; Instruction replaced by hijack
+   ;        JSL $82E071 ; Queue room music data
+   ;        RTS
+   ;    .freespace
+   ;}
+   ;warnpc $82E353
+
+
+    ;org $82E65D : LDA #$E6A2
+;
+    ;org $82E650 : CLCRTS:
+    ;org $82E752
+    ;    JSR WaitForMusic3
+    ;org $82E664
+    ;WaitForMusic3:
+    ;    JSR $D961 : BCC CLCRTS ; instruction replaced by hijack
+    ;    JSL $808EF4 : BCS CLCRTS ; If music is queued: return
+    ;    ;JSL $82E0D5 ; load new music track if changed
+    ;    SEC : RTS
+    ;warnpc $82E675
+
+
+
+
+
+
+
+;   org $82E2D6
+;           JSR QueueMusic
+;   
+;   org HandleMusicQueueAndExecuteFunction_freespace
+;   QueueMusic: {
+;           STA $099C ; Instruction replaced by hijack
+;           JSL QueueDestinationRoomMusic
+;           RTS
+;       .freespace
+;   }
+;   warnpc $82E353
+;
+;   org !FreespaceAnywhere
+;   QueueDestinationRoomMusic: {
+;           PHP : PHB
+;           PEA $8383 : PLB : PLB ; DB = $83
+;           LDX $078D ; X = [door pointer]
+;           LDA $0000,x : TAX ; X = Room pointer (this would normally go in $079B)
+;           PEA $8F8F : PLB : PLB ; DB = $8F
+;           JSL $8FE5D2 ; Room state checking handler - issue: before calling this we need the area bit set accordingly, and whatever other states look at... Also, this modifies $07BB, todo back that up. TODO see what else it modifies.
+;           LDX $07BB ; X = room state pointer
+;           LDA $0004,x : AND #$00FF : STA $07CB ; Music data index = [[X] + 4]
+;           LDA $0005,x : AND #$00FF : STA $07C9 ; Music track index = [[X] + 5]
+;           JSL $82E071 ; Queue room music data
+;
+;           ; JSL $82E071 - queue room music data
+;           ;$82:E774 20 F1 DD    JSR $DDF1  [$82:DDF1]  ; Load destination room CRE bitset
+;           ;$82:E777 20 12 DE    JSR $DE12  [$82:DE12]  ; Load door header
+;           ;$82:E77A 20 6F DE    JSR $DE6F  [$82:DE6F]  ; Load room header
+;           ;$82:E77D 20 F2 DE    JSR $DEF2  [$82:DEF2]  ; Load state header
+;           PLB : PLP : RTL
+;       .freespace
+;   }
+;   !FreespaceAnywhere := QueueDestinationRoomMusic_freespace
+;   warnpc !FreespaceAnywhereEnd
+
+
 }
 
 ; ======================================================================
