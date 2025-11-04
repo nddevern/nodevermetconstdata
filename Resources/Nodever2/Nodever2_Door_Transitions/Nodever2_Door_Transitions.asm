@@ -7,6 +7,7 @@ lorom
 ; testing - ceres broke when leaving ridleys room and running through the hallway after
 ; testing - also broke the screen when leaving early supers room in much the same way.
 ; I'd also like to see if there's anything I can do about the black lines that show when the door is moving... most prevalent in vertical doors
+; there is still a bug with layer 2 - see green brin fireflea room
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
