@@ -1,5 +1,8 @@
 lorom
 
+math round off
+math pri on
+
 ; todo:
 ; test doors on screen edges and doors not touching any screen border / etc - basically "door glitch fix" patch should either be compatible with mine or my code should also have that bug fixed
 ; also I think that maxspeed isn't strictly obeyed and the game can *technically* exceed it as it continues to accelerate for 1 frame past it. if you have high accel values this is a problem right?
@@ -40,11 +43,14 @@ lorom
     !FreespaceAnywhereEnd  = $B8FFFF
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !CameraAcceleration    = #$0001
-    !CameraSubAcceleration = #$0000
-    !CameraMaxSpeed        = #$000F  ; Should be 000F or less.
+    !TransitionLength      = $0040   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
+                                     ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
+    !TransitionAnimation        = 1  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
+                                     ;     1: make the screen move in a curve toward it's destination.
+                                     ;     2: make the screen move in a straight line toward it's destination.
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
     !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
-    !VanillaCode                = 0  ; Set to 0 to compile the vanilla door transition code instead of mine. Was useful for debugging.
+    !VanillaCode                = 0  ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
     ; Vanilla-like settings:
     ; When these settings are used, the door transition takes almost exactly as long as vanilla.
@@ -65,8 +71,6 @@ lorom
     !Freespace82ReportStart := !Freespace82
 
     ; Vanilla variables
-    !RamUploadingToApuFlag            = $0617 ; I am going to set to 0001 if an async upload is in progress.
-    !RamDisableSoundsFlag             = $05F5
     !RamDoorTransitionFunctionPointer = $099C
     !RamGameState                     = $0998
     !RamDoorTransitionFrameCounter    = $0925 ; for horizontal doors, 0 to !TransitionLength. vertical, 0 to !TransitionLength-1...
@@ -100,29 +104,14 @@ lorom
     !CurRamAddr                                  := !RamStart
     
     !RamLayer1XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraXSpeed                             := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraXSubSpeed                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraXState                             := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraXDistanceTraveledWhileAccelerating := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamCameraXTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
 
     !RamLayer1YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraYSpeed                             := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraYSubSpeed                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraYState                             := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamCameraYDistanceTraveledWhileAccelerating := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-
-    !RamMusicHandlerState                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamEnableAsyncUploadsFlag                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-
-    !RamSpcDB                                    := $9B ; 1 byte
-    !RamSpcData                                  := $9C ; 2 bytes
-    !RamSpcIndex                                 := $9E ; 1 byte
-    !RamSpcLength                                := $9F ; 2 bytes
-
-    !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; basically their state machine address\
-    !RamNmiCounter                               := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; ?
 
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
@@ -294,9 +283,11 @@ if !VanillaCode == 0
             PHP : REP #$30
             LDA !RamLayer1XPosition : STA !RamLayer1XStartPos
             LDA !RamLayer1YPosition : STA !RamLayer1YStartPos
+            LDA !RamLayer2XPosition : STA !RamLayer2XStartPos
+            LDA !RamLayer2YPosition : STA !RamLayer2YStartPos
             LDA #$0000
-            STA !RamCameraXSpeed : STA !RamCameraXSubSpeed : STA !RamCameraXState : STA !RamLayer1XSubPosition
-            STA !RamCameraYSpeed : STA !RamCameraYSubSpeed : STA !RamCameraYState : STA !RamLayer1YSubPosition
+            STA !RamCameraXTableIndex
+            STA !RamCameraYTableIndex
             JSR MainScrollingRoutine ; Instruction replaced by hijack (effectively) - Run main scrolling routine once
             PLP : RTS
         .freespace
@@ -368,162 +359,176 @@ if !VanillaCode == 0
     ; Since all of this is being done in an interrupt, we don't want to use misc RAM because that could
     ;  disrupt other code.
     ScrollCameraX: {
-            LDA !RamCameraXState : CMP #$0003 : BNE +
-            SEC : RTL
-        +   
+            LDA !RamLayer2XStartPos : PHA
+            LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BNE + : PLA : INC : PHA ; tPrimaryDirectionFlag
+        +   LDA !RamCameraXTableIndex : PHA
             LDA !RamLayer2XDestination : PHA
             LDA !RamLayer2XPosition : PHA
-            LDA #$0000 : PHA ; tInvertDirectionFlag = right
-            LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XPosition : BPL +
-            PLA : INC : PHA ; left
+            LDA #$0000 : PHA : LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1XDestination : PHA
             LDA !RamLayer1XPosition : PHA
-            LDA !RamCameraXDistanceTraveledWhileAccelerating : PHA
-            LDA !RamLayer1XSubPosition : PHA
-            LDA !RamCameraXState : PHA
-            LDA !RamCameraXSubSpeed : PHA
-            LDA !RamCameraXSpeed : PHA
             LDA !RamLayer1XStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
             PLA ;: STA !RamLayer1XStartPos; no need to write back
-            PLA : STA !RamCameraXSpeed
-            PLA : STA !RamCameraXSubSpeed
-            PLA : STA !RamCameraXState
-            PLA : STA !RamLayer1XSubPosition
-            PLA : STA !RamCameraXDistanceTraveledWhileAccelerating
             PLA : STA !RamLayer1XPosition
             PLA ;: STA !RamLayer1XDestination
             PLA ; tInvertDirectionFlag
             PLA : STA !RamLayer2XPosition
             PLA ; !RamLayer2XDestination
+            PLA : STA !RamCameraXTableIndex
+            PLA ; tPrimaryDirectionFlag
+            PLA ; !RamLayer2XStartPos
             RTL
     }
     
     ScrollCameraY: {
-            LDA !RamCameraYState : CMP #$0003 : BNE +
-            SEC : RTL
-        +
+            LDA !RamLayer2YStartPos : PHA
+            LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BEQ + : PLA : INC : PHA ; tPrimaryDirectionFlag
+        +   LDA !RamCameraYTableIndex : PHA
             LDA !RamLayer2YDestination : PHA
             LDA !RamLayer2YPosition : PHA
-            LDA #$0000 : PHA ; tInvertDirectionFlag = down
-            LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YPosition : BPL +
-            PLA : INC : PHA ; up
+            LDA #$0000 : PHA : LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1YDestination : PHA
             LDA !RamLayer1YPosition : PHA
-            LDA !RamCameraYDistanceTraveledWhileAccelerating : PHA
-            LDA !RamLayer1YSubPosition : PHA
-            LDA !RamCameraYState : PHA
-            LDA !RamCameraYSubSpeed : PHA
-            LDA !RamCameraYSpeed : PHA
             LDA !RamLayer1YStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
             PLA ;: STA !RamLayer1YStartPos; no need to write back
-            PLA : STA !RamCameraYSpeed
-            PLA : STA !RamCameraYSubSpeed
-            PLA : STA !RamCameraYState
-            PLA : STA !RamLayer1YSubPosition
-            PLA : STA !RamCameraYDistanceTraveledWhileAccelerating
             PLA : STA !RamLayer1YPosition
             PLA ;: STA !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
             PLA : STA !RamLayer2YPosition
             PLA ; !RamLayer2YDestination
+            PLA : STA !RamCameraYTableIndex
+            PLA ; tPrimaryDirectionFlag
+            PLA ; !RamLayer2YStartPos
             RTL
     }
+
+    EightBitMultiplication: ; stolen from https://www.nesdev.org/wiki/8-bit_Multiply and hacked into inefficiency by yours truly
+    ;;
+    ; Multiplies two 8-bit factors to produce a 16-bit product
+    ; @param A one factor
+    ; @param Y another factor
+    ; @return 16 bit result in A
+    ; Y gets clobbered
+    !prodlo  = $26
+    !factor2 = $27
+        PHP
+        REP #$30
+        PHA
+        LDA !prodlo : PHA : LDA $03,s
+        SEP #$30
+        ; Factor 1 is stored in the lower bits of prodlo; the low byte of
+        ; the product is stored in the upper bits.
+        LSR  ; prime the carry bit for the loop
+        STA !prodlo
+        STY !factor2
+        LDA #0
+        LDY #8
+    .loop:
+        ; At the start of the loop, one bit of prodlo has already been
+        ; shifted out into the carry.
+        BCC .noadd
+        CLC
+        ADC !factor2
+    .noadd:
+        ROR
+        ROR !prodlo  ; pull another bit out for the next iteration
+        DEY         ; inc/dec don't modify carry; only shifts and adds do
+        BNE .loop
+        STA !factor2
+        REP #$30
+        LDA !prodlo
+        PLY : STY !prodlo
+        PLY
+        PLP
+        RTS
+    .endproc
 
     ScrollCamera: {
         ; Scrolls the screen. This function is expected to be called every frame until this function returns carry set
         ; Assumes REP#$30 before calling
-        ; Parameters (before JSR return addr is pushed to stack):
-        ; $01,s: tLayer1StartPos
-        ; $03,s: tCameraSpeed
-        ; $05,s: tCameraSubSpeed
-        ; $07,s: tCameraState
-        ; $09,s: tLayer1SubPosition
-        ; $0B,s: tCameraDistanceTraveledWhileAccelerating
-        ; $0D,s: tLayer1Position
-        ; $0F,s: tLayer1Destination
-        ; $11,s: tInvertDirectionFlag ; 0 for door moving right or down, nonzero for door moving left or up
-        ; $13,s: tLayer2Position
-        ; $15,s: tLayer2Destination
+        ; Parameters listed below:
 
         ; These defines account for the return addr on the stack, as well as PHP : PHX : PHA
-        !tBaseStackOffset #= 1+2+1+2+2 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha
-        !tLayer1StartPos                          = !tBaseStackOffset+0,s : !tLayer1StartPosAfterPha = !tBaseStackOffset+2,s
-        !tCameraSpeed                             = !tBaseStackOffset+2,s
-        !tCameraSubSpeed                          = !tBaseStackOffset+4,s
-        !tCameraState                             = !tBaseStackOffset+6,s
-        !tLayer1SubPosition                       = !tBaseStackOffset+8,s
-        !tCameraDistanceTraveledWhileAccelerating = !tBaseStackOffset+10,s
-        !tLayer1Position                          = !tBaseStackOffset+12,s : !tLayer1PositionAfterPha = !tBaseStackOffset+14,s
-        !tLayer1Destination                       = !tBaseStackOffset+14,s
-        !tInvertDirectionFlag                     = !tBaseStackOffset+16,s
-        !tLayer2Position                          = !tBaseStackOffset+18,s
-        !tLayer2Destination                       = !tBaseStackOffset+20,s
+        !tBaseStackOffset #= 1+2+1+2+2+2+1 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha, +2 for phy, +1 for phb
+        !tStackOffset := !tBaseStackOffset
+        !tLayer1StartPos                          = !tStackOffset+0,s
+        !tLayer1Position                          = !tStackOffset+2,s
+        !tLayer1Destination                       = !tStackOffset+4,s
+        !tInvertDirectionFlag                     = !tStackOffset+6,s
+        !tLayer2Position                          = !tStackOffset+8,s
+        !tLayer2Destination                       = !tStackOffset+10,s
+        !tCameraTableIndex                        = !tStackOffset+12,s
+        !tPrimaryDirectionFlag                    = !tStackOffset+14,s
+        !tLayer2StartPos                          = !tStackOffset+16,s
 
-            PHP : PHX : PHA
+            PHP : PHX : PHY : PHA : PHB
             REP #$30
-
-            ; Failsafe: If the scrolling has taken this long, we may be softlocked. End it here.
-            LDA !RamDoorTransitionFrameCounter : CMP.w #10*60 : BMI + ; 10 seconds
-            LDA #$0003 : STA !tCameraState
-
-        +   LDA !tCameraState : ASL : TAX : JMP (.cameraStateHandlers,x)
-        .cameraStateHandlers:
-            dw .accelerate, .move, .decelerate, .stop
-
-            ; update speed then layer1 pos
-            ; first check if camera needs to be accelerated
-        .accelerate
-            LDA !tCameraSpeed : CMP !CameraMaxSpeed : BPL ..stopAccelerating
-            LDA !tLayer1Destination : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC
-        +++ LSR : PHA : LDA !tLayer1PositionAfterPha : SEC : SBC !tLayer1StartPosAfterPha : BPL +++ : EOR #$FFFF : INC
-        +++ CMP $01,s : BPL ..stopAcceleratingWithPull : PLA ; stop accelerating if we're over halfway
-            LDA !CameraSubAcceleration : CLC : ADC !tCameraSubSpeed : STA !tCameraSubSpeed ; continue accelerating
-            LDA !CameraAcceleration : ADC !tCameraSpeed : STA !tCameraSpeed
-            BRA .setPosition
-        ..stopAcceleratingWithPull
-            PLA
-        ..stopAccelerating
-            LDA !tCameraState : INC : STA !tCameraState
-            LDA !tLayer1Position : SEC : SBC !tLayer1StartPos : BPL +++ : EOR #$FFFF : INC
-        +++ STA !tCameraDistanceTraveledWhileAccelerating
-        .move
-            ; first, check if we need to start declerating
-            LDA !tCameraSubSpeed : BNE + : LDA !tCameraSpeed : BEQ .stop ; If we got here with speed of 0, stop this madness. (prevents possible softlock)
-        +   LDA !tLayer1Destination : SEC : SBC !tLayer1Position : BPL +++ : EOR #$FFFF : INC
-        +++ CMP !tCameraDistanceTraveledWhileAccelerating
-            BEQ + : BPL .setPosition
-            ; start decelerating
-        +   LDA !tCameraState : INC : STA !tCameraState
-            ;BRA .setPosition ; start decelerating next frame
-        .decelerate
-            LDA !tCameraSubSpeed : SEC : SBC !CameraSubAcceleration : STA !tCameraSubSpeed
-            LDA !tCameraSpeed : SBC !CameraAcceleration : STA !tCameraSpeed
-        .setPosition
-            LDA !tInvertDirectionFlag : BNE ..invert
-            LDA !tLayer1SubPosition : CLC : ADC !tCameraSubSpeed : STA !tLayer1SubPosition
-            LDA !tLayer1Position : ADC !tCameraSpeed : STA !tLayer1Position
-            LDA !tLayer2Position : CLC : ADC !tCameraSpeed : STA !tLayer2Position
-            BRA +
-        ..invert
-            LDA !tLayer1SubPosition : SEC : SBC !tCameraSubSpeed : STA !tLayer1SubPosition
-            LDA !tLayer1Position : SBC !tCameraSpeed : STA !tLayer1Position
-            LDA !tLayer2Position : SEC : SBC !tCameraSpeed : STA !tLayer2Position
-        +
-        .checkStop
-            ; check if we need to stop
-            LDA !tInvertDirectionFlag : BNE ..invert
-            LDA !tLayer1Position : CMP !tLayer1Destination : BPL .stop : BRA +
-        ..invert
-            LDA !tLayer1Destination : CMP !tLayer1Position : BPL .stop
-        +   LDA !tCameraSpeed : BMI .stop
-            PLA : PLX : PLP : CLC : RTS
-        .stop
-            LDA #$0003 : STA !tCameraState ; camera state = stop
+            
+            LDA !tLayer1Destination : SEC : SBC !tLayer1StartPos : BPL + : EOR #$FFFF : INC : +
+            TAY ; Y contains distance between start and end of transition
+            
+            LDA !tLayer1Position : CMP !tLayer1Destination : BEQ .finish
+            LDA !tCameraTableIndex : CMP #!TransitionLength-1 : BMI .continue
+        .finish
             LDA !tLayer1Destination : STA !tLayer1Position
             LDA !tLayer2Destination : STA !tLayer2Position
-            PLA : PLX : PLP : SEC : RTS
+            PLB : PLA : PLY : PLX : PLP : SEC : RTS ; done
+        .continue
+            PHK : PLB ; DB = current bank
+            LDA !tCameraTableIndex : TAX
+            LDA .lookupTable,x : AND #$00FF : BNE + : INC : +
+            PHA : !tStackOffset := !tBaseStackOffset+2
+            
+            ; $01,s contains the distance from the table
+            ; check if we need to convert it to a %
+            TYA : CMP #$0100 : BEQ +
+            
+            ; convert to a %
+            ; the offset we need in the end (respecting order of operations):
+            ;     layer 1 x pos = layer 1 x start pos + $01,s * (distance between start and end of transition) / 100h
+            LDA $01,s : JSR EightBitMultiplication
+            LSR #8
+            STA $01,s
+        +   
+            LDA !tInvertDirectionFlag : BNE .invert
+            LDA !tLayer1StartPos : CLC : ADC $01,s : STA !tLayer1Position
+            LDA !tLayer2StartPos : CLC : ADC $01,s : STA !tLayer2Position
+            BRA +
+        .invert
+            LDA !tLayer1StartPos : SEC : SBC $01,s : STA !tLayer1Position
+            LDA !tLayer2StartPos : SEC : SBC $01,s : STA !tLayer2Position
+        +   PLA : !tStackOffset := !tBaseStackOffset
+
+            LDA !tCameraTableIndex : INC : STA !tCameraTableIndex
+            if !TransitionAnimation == 1
+                LDA !tPrimaryDirectionFlag : BNE +
+                ; we are in the secondary direction, increment counter again to animate faster
+                LDA !tCameraTableIndex : INC #1 : STA !tCameraTableIndex
+            +
+            endif
+        .return
+            PLB : PLA : PLY : PLX : PLP : CLC : RTS ; return, not complete
+
+        ; The ultimate cheat code: Making the assembler do all the work.
+        ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
+        ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
+        ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
+        ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
+        ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
+        ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
+        .lookupTable:
+        macro generateLookupTableEntry(t)
+            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
+        endmacro
+        print "BezierTest_lookupTable: ", pc
+        !tCounter = 0
+        while !tCounter < !TransitionLength
+            %generateLookupTableEntry(!tCounter)
+            !tCounter #= !tCounter+1
+        endwhile
+
         .freespace
     }
     !FreespaceAnywhere := ScrollCamera_freespace
@@ -562,549 +567,6 @@ if !VanillaCode == 0
         .freespace
     }
     warnpc $80AF89
-}
-
-; ==================================================================
-; ============== DOOR TRANSITION LOADING - LOAD MUSIC ==============
-; ==================================================================
-{
-
-;10-22
-; I am going to expand the door transition game states to call a new handler for music queue
-; also going to break the state that has the busy loop up so it can actually return back to the state handler every frame
-
-; my new handler will (start out as) its own entire state machine 
-
-; todo NOP out all places in door transitions where we are currently handling music queue and sound effects
-
-; more notes:
-; looks like it's actually the music handler that handles spc uploads?
-; so it's the main game loop (the thing that actually calls each game state function) that calls
-; the music handler... ugh
-; so I guess I need to patch the main game loop or the music queue handler to have special behavior
-; when we're in a door transition...
-
-; thoughts:
-; update music queue handler to have 2 options
-; based on a memory address
-; 1: transfer music until NMI, then leave SPC hanging until next frame.
-; 2: transfer music until it is done.
-
-; for option 1, we'd also have to keep track of if we're done or not,
-; so that next frame when the music queue handler is called,
-; we don't actully mess with the music queue variables and instead
-; go straight back to working on transfering the music.
-
-; this sounds like hell.
-
-; TODO repoint these
-
-org $808F82
-    JSR CleanupOnlyIfNonAsyncStarted
-    PLP : RTL
-
-org $808F0F
-    JMP CheckIfHandleMusicQueue
-
-org $808340
-    JMP CustomRequestNmi
-
-
-org $808028
-    JSL CheckIfStartAsyncUpload
-
-org !Freespace80
-CleanupOnlyIfNonAsyncStarted:
-        LDA !RamUploadingToApuFlag : BNE +
-        JSL MusicQueueCleanupAfterTransfer
-    +   RTS
-
-MusicQueueCleanupAfterTransfer:
-print "MusicQueueCleanupAfterTransfer: ", pc
-        PHP
-        SEP #$20
-        STZ $064C   ; Current music track = 0
-        REP #$20
-        LDX $063B   ;\
-        STZ $0619,x ;) Music queue entries + [music queue start index] = 0
-        STZ $0629,x ; Music queue timer + [music queue start index] = 0
-        INX         ;\
-        INX         ;|
-        TXA         ;) Music queue start index = ([music queue start index] + 2) % 10h
-        AND #$000E  ;|
-        STA $063B   ;/
-        LDA #$0008  ;\
-        STA $0686   ;) Sound handler downtime = 8
-        PLP
-        RTL
-
-CheckIfHandleMusicQueue:
-    PHP : REP #$30
-    LDA !RamUploadingToApuFlag : BNE .skip
-    PLP
-    DEC $063F ; instruction replaced by hijack
-    JMP $8F12
-.skip
-    PLP : PLP : RTL
-
-CustomRequestNmi:
-    STA $05B4 ; nmi request flag = 1
-    LDA !RamUploadingToApuFlag : BNE +
-    JMP $8343 ; back to normal nmi routine
-+   JMP WaitForNmiWhileTransferringData
-
-
-; Returns zero flag set if normal upload should continue, zero flag clear otherwise.
-CheckIfStartAsyncUpload:
-        LDA !RamUploadingToApuFlag : BEQ +
-        TDC : INC : DEC : RTL
-    +   LDA !RamEnableAsyncUploadsFlag : BNE +
-        LDA $808008 : RTL ; instruction replaced by hijack
-    +   PHP
-        SEP #$30
-        LDA $02 : STA !RamSpcDB
-        REP #$30
-        LDA $00 : STA !RamSpcData
-        LDA #SpcInit : STA !RamAsyncSpcState
-        LDA #$0001 : STA !RamUploadingToApuFlag ; Begin async upload
-        LDA #$FFFF : PLP : XBA : RTL
-
-
-
-
-; This is heavily based off of / copied from NobodyNada's work for the SM practice hack at https://github.com/tewtal/sm_practice_hack/blob/master/src/menu.asm
-; todo disable sounds during this time. todo initialize all of our ram variables.
-
-WaitForNmiWhileTransferringData:
-{
-    REP #$30
-    LDA !RamAsyncSpcState : TAX
-
-  .loop
-    LDA $05B4 : AND #$00FF ; NMI complete flag
-    BEQ .done
-
-    CPX #$0000 : BPL .loop
-    PHA : PHP : PHB : JSR JumpToX : PLB : PLP
-    LDA !RamAsyncSpcState : TAX : PLA
-    BRA .loop
-
-  .done
-    PLB : PLP
-    RTL
-}
-
-JumpToX:
-{
-    DEX : PHX
-    RTS
-}
-
-SpcInit:
-{
-    PHP
-    SEP #$20
-    REP #$10
-    LDA #$FF : STA $002140
-    PLP
-
-
-    ; wait for SPC to be ready
-    LDA #$BBAA : CMP $2140 : BNE .return
-
-    ; disable soft reset
-    ;LDA #$FFFF : STA !RamUploadingToApuFlag
-
-    SEP #$20
-    LDA #$CC : STA !RamSpcIndex
-
-    REP #$20
-    ;LDA #$CFCF : STA !RamSpcDB
-    ;LDA #$8000 : STA !RamSpcData
-
-    LDA.w #SpcNextBlock : STA !RamAsyncSpcState
-
-  .return
-    RTS
-}
-
-SpcNextBlock:
-{
-    SEP #$20
-    PHB : LDA !RamSpcDB : PHA : PLB
-    LDY !RamSpcData
-
-    ; Get block size
-    LDA #$01
-    LDX $0000,Y : BNE .not_last
-    LDA #$00
-
-  .not_last
-    INY : BNE .done_inc_bank_1
-    JSR SpcIncrementBank
-  .done_inc_bank_1
-    INY : BNE .done_inc_bank_2
-    JSR SpcIncrementBank
-  .done_inc_bank_2
-    STX !RamSpcLength
-
-    ; Get block address
-    LDX $0000,Y
-    INY : BNE .done_inc_bank_3
-    JSR SpcIncrementBank
-  .done_inc_bank_3
-    INY : BNE .done_inc_bank_4
-    JSR SpcIncrementBank
-  .done_inc_bank_4
-    PLB : STX $2142
-
-    STA $2141
-
-    STY !RamSpcData
-    REP #$20
-    LDA.w #SpcNextBlock_wait : STA !RamAsyncSpcState
-
-    RTS
-}
-
-SpcIncrementBank:
-{
-    PHA
-    LDA !RamSpcDB : INC : STA !RamSpcDB
-    PHA : PLB : PLA
-    LDY #$8000
-    RTS
-}
-
-SpcNextBlock_wait:
-{
-    SEP #$20
-    LDA !RamSpcIndex : STA $2140 : CMP $2140 : BNE .return
-
-    STZ !RamSpcIndex
-    REP #$20
-    LDA !RamSpcLength : BEQ .eof
-    LDA.w #SpcTransfer : STA !RamAsyncSpcState
-    RTS
-
-  .eof
-    TDC : STA !RamAsyncSpcState
-    STZ !RamDisableSoundsFlag : STZ !RamUploadingToApuFlag
-    JSL MusicQueueCleanupAfterTransfer
-
-  .return
-    RTS
-}
-
-SpcTransfer:
-{
-    ; Determine how many bytes to transfer
-    LDA !RamSpcLength : TAX
-    SBC #$0040 : BCC .last
-    LDX #$0040 : STA !RamSpcLength
-    BRA .setup
-
-  .last
-    STZ !RamSpcLength
-
-  .setup
-    SEP #$20
-    PHB : LDA !RamSpcDB : PHA : PLB
-    LDY !RamSpcData
-    LDA !RamSpcIndex
-    SEP #$20
-
-  .transfer_loop
-    XBA : LDA $0000,Y : XBA
-
-    REP #$20
-    STA $002140
-    SEP #$20
-
-  .wait_loop
-    CMP $002140 : BNE .wait_loop
-
-    INC
-    INY : BNE .done_inc_bank
-    JSR SpcIncrementBank
-  .done_inc_bank
-    DEX : BNE .transfer_loop
-
-    LDX !RamSpcLength : BNE .timeout
-    ; Done with the transfer!
-    CLC : ADC #$03 : STA !RamSpcIndex : STY !RamSpcData
-    REP #$20
-    LDA.w #SpcNextBlock : STA !RamAsyncSpcState
-
-    PLB
-    RTS
-
-  .timeout
-    STA !RamSpcIndex
-    STY !RamSpcData
-
-    PLB
-    RTS
-}
-
-Done:
-
-!Freespace80 := Done
-warnpc !Freespace80End
-
-
-    org $82E526 : JSR SetWaitForScrollingDoorTransitionFunction : RTS
-
-    ;org $82E664 ; beware, we've hijacked this in one other place but its commented out
-    ;    JSL CheckIfDoorNeedsToWaitOnMusic
-
-;    org $82E72C : JSR DisableAsyncUploads
-
-    org $82E17D : JSR InitializeMusicHandler
-
-    
-    ;org $82E16F : JSR RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction ; game state 9
-    org $82E28F : JMP RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction ; game state B
-
-    org $82E27C : LDA #$E2DB ; skip "wait for sounds to finish" - this will be handled by door transition music handler
-    org $82E4AD : NOP #4 ; this will be handled by door transition music handler
-    
-    org $82E664
-        LDA !RamMusicHandlerState : CMP #$0003 : BNE +
-        LDA #$E6A2 : STA $099C
-    +   RTS
-    warnpc $82E675
-
-    org !Freespace82 
-    ; this allows us to still transfer music in background instead of sitting in the busy loop.
-    SetWaitForScrollingDoorTransitionFunction: {
-        LDA #WaitForScrollingFunction : STA $099C
-    }
-
-    WaitForScrollingFunction: {
-            LDA $0931 : BPL +
-            LDA #$E52B : STA $099C
-        +   RTS
-    }
-
-    RunDoorTransitionMusicHandlerAndExecuteDoorTransitionFunction: {
-        JSR DoorTransitionMusicHandler
-        JMP ($099C) ; instruction replaced by hijack
-    }
-
-    ;; returns carry set if door needs to wait on music
-    ;CheckIfDoorNeedsToWaitOnMusic:
-    ;        LDA !RamUploadingToApuFlag : BNE +
-    ;        JSL $808EF4 : BCS + ; instruction replaced by hijack
-    ;        LDA #$0000 : STA !RamEnableAsyncUploadsFlag
-    ;        CLC : RTS
-    ;    +   SEC : RTS
-
-
-;    DisableAsyncUploads:
-;            STA $099C ; instruction replaced by hijack
-;            PHA : LDA #$0000 : STA !RamEnableAsyncUploadsFlag : PLA
-;            RTS
-
-    InitializeMusicHandler: { ; todo can this be moved out of this bank?
-            LDA #$0000
-            STA !RamMusicHandlerState
-            STA !RamSpcDB
-            STA !RamSpcData
-            STA !RamSpcIndex
-            STA !RamSpcLength
-            STA !RamAsyncSpcState
-            STA !RamNmiCounter
-            LDA #$0001 : STA !RamEnableAsyncUploadsFlag
-            LDA $0E16 : RTS ; instruction replaced by hijack
-    }
-
-    
-
-    DoorTransitionMusicHandler: {
-        ;JSL $808F0C ; Handle music queue
-        PHP : REP #$30
-        LDA !RamUploadingToApuFlag : BNE .return
-    +   LDA !RamMusicHandlerState ; : BNE + : JSL $8289EF ; Handle sound effects if music handler state is 0
-    +   LDA !RamMusicHandlerState : ASL : TAX : JMP (.musicStateHandlers,x)
-        
-        .musicStateHandlers
-            dw .waitForSoundsAndQueueMusic, .waitUntilMusicIsNotQueued, .queueMusicTrack, .done
-
-        .waitForSoundsAndQueueMusic
-            PHP
-            SEP #$20
-            LDA $0646 : SEC : SBC $0643 : AND #$0F : BNE + ; If [sound 1 queue next index] - [sound 1 queue start index] & Fh != 0: return
-            LDA $0647 : SEC : SBC $0644 : AND #$0F : BNE + ; If [sound 2 queue next index] - [sound 2 queue start index] & Fh != 0: return
-            LDA $0648 : SEC : SBC $0645 : AND #$0F : BNE + ; If [sound 3 queue next index] - [sound 3 queue start index] & Fh != 0: return
-            REP #$20
-            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-            JSL QueueDestinationRoomMusic ; Queue room music data
-        +   PLP : BRA .return
-
-        .waitUntilMusicIsNotQueued
-            JSL $808EF4 : BCS + ; Check if music is queued
-            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-        +   BRA .return
-
-        .queueMusicTrack
-            ; todo: follow door pointers to get music track data set up in RAM correctly before doing the rest of this
-            JSL $82E0D5 ; Load new music track if changed - I think this is supposed to be after we uhh
-            LDA !RamMusicHandlerState : INC : STA !RamMusicHandlerState
-            BRA .return
-
-        .done
-            LDA #$0000 : STA !RamEnableAsyncUploadsFlag
-
-        .return
-            PLP : RTS
-
-        .freespace
-    }
-    !Freespace82 := DoorTransitionMusicHandler_freespace
-    warnpc !Freespace82End
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-;lots of music change testing. starting to think the ideal way to do this would be another interrupt...
-;what I will say is that there is plenty of CPU time to spare during fade to black. we should be queueing the music earlier.
-
-; I actually think that if we queue the music earlier, we could finish the entire transfer in time...
-
-
-
-    ;org $82E4AD : NOP #4 ; remove the code that originally queued room music data
-
-;!!!!!
-    ;org $82E526 ; busy loop while waiting for scrolling
-    ;        JSR WaitForMusic
-    ;
-    ;org DoorTransitionFunctionScrollScreenToAlignment_freespace
-    ;WaitForMusic: {
-    ;        JSR WaitForMusic2
-    ;        JSL $808338 ; Wait for NMI
-    ;        LDA $0931 : RTS ; instruction replaced by hijack
-    ;    .freespace
-    ;}
-    ;warnpc $82E353
-;!!!!!
-
-
-    ; todo: $E29E should be the one to queue the music
-    ; the door transition game states also need to call the music queue handler
-    ; then we can continue to use the code above but not call the music queue handler from there (since it'll be done by the game state handlers)
-
-
-    ; note: music queue is supposed to be handled before sound effects (8089ef)
-    
-    
-    ;org $82E28F ; game state bh (door transition - main).
-    ;        JMP HandleMusicQueueAndExecuteFunction
-
-;!!!!!
-    ;org WaitForMusic_freespace
-    ;WaitForMusic2: {
-    ;        JSL $808EF4 : BCC + ; If music is queued:
-    ;        JSL $808F0C         ; Handle music queue and return
-    ;        RTS
-    ;    +   JSL $82E0D5 ; Load new music track if changed
-    ;        RTS
-    ;}
-;!!!!!
-
-    ;HandleMusicQueueAndExecuteFunction: {
-    ;        LDA $099C : CMP #$E29E : BEQ + ; If we're not done waiting for sounds to finish, skip music queue (is this needed?)
-    ;        JSR WaitForMusic2
-    ;    +   JMP ($099C) ; Execute door transition function
-    ;    .freespace
-    ;}
-    ;warnpc $82E353
-
-    ;org $82E3BC ; right after creating door interrupt
-    ;    JSR QueueMusic2
-
-   ;org HandleMusicQueueAndExecuteFunction_freespace
-   ;QueueMusic2: {
-   ;        STA $099C ; Instruction replaced by hijack
-   ;        JSL $82E071 ; Queue room music data
-   ;        RTS
-   ;    .freespace
-   ;}
-   ;warnpc $82E353
-
-
-    ;org $82E65D : LDA #$E6A2
-;
-    ;org $82E650 : CLCRTS:
-    ;org $82E752
-    ;    JSR WaitForMusic3
-    ;org $82E664
-    ;WaitForMusic3:
-    ;    JSR $D961 : BCC CLCRTS ; instruction replaced by hijack
-    ;    JSL $808EF4 : BCS CLCRTS ; If music is queued: return
-    ;    ;JSL $82E0D5 ; load new music track if changed
-    ;    SEC : RTS
-    ;warnpc $82E675
-
-
-
-
-
-
-
-;   org $82E2D6
-;           JSR QueueMusic
-;   
-;   org HandleMusicQueueAndExecuteFunction_freespace
-;   QueueMusic: {
-;           STA $099C ; Instruction replaced by hijack
-;           JSL QueueDestinationRoomMusic
-;           RTS
-;       .freespace
-;   }
-;   warnpc $82E353
-;
-   org !FreespaceAnywhere
-   QueueDestinationRoomMusic: {
-           PHP : PHB
-           PEA $8383 : PLB : PLB ; DB = $83
-           LDX $078D ; X = [door pointer]
-           LDA $0000,x : TAX ; X = Room pointer (this would normally go in $079B)
-           PEA $8F8F : PLB : PLB ; DB = $8F
-           JSL $8FE5D2 ; Room state checking handler - issue: before calling this we need the area bit set accordingly, and whatever other states look at... Also, this modifies $07BB, todo back that up. TODO see what else it modifies.
-           LDX $07BB ; X = room state pointer
-           LDA $0004,x : AND #$00FF : STA $07CB ; Music data index = [[X] + 4]
-           LDA $0005,x : AND #$00FF : STA $07C9 ; Music track index = [[X] + 5]
-           JSL $82E071 ; Queue room music data
-
-           ; JSL $82E071 - queue room music data
-           ;$82:E774 20 F1 DD    JSR $DDF1  [$82:DDF1]  ; Load destination room CRE bitset
-           ;$82:E777 20 12 DE    JSR $DE12  [$82:DE12]  ; Load door header
-           ;$82:E77A 20 6F DE    JSR $DE6F  [$82:DE6F]  ; Load room header
-           ;$82:E77D 20 F2 DE    JSR $DEF2  [$82:DEF2]  ; Load state header
-           PLB : PLP : RTL
-       .freespace
-   }
-   !FreespaceAnywhere := QueueDestinationRoomMusic_freespace
-   warnpc !FreespaceAnywhereEnd
-
-
 }
 
 ; ======================================================================
