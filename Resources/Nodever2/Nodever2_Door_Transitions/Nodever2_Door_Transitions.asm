@@ -42,7 +42,6 @@ math pri on
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
-    !CameraAcceleration    = #$0001
     !TransitionLength      = $0040   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
                                      ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
     !TransitionAnimation        = 1  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
