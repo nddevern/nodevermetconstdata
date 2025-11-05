@@ -42,7 +42,7 @@ math pri on
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
-    !TransitionLength      = $0040   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
+    !TransitionLength      = $002C   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
                                      ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
     !TransitionAnimation        = 1  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
                                      ;     1: make the screen move in a curve toward it's destination.
@@ -50,19 +50,6 @@ math pri on
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
     !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0  ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
-
-    ; Vanilla-like settings:
-    ; When these settings are used, the door transition takes almost exactly as long as vanilla.
-    ; !ScreenFadeDelay       = #$000C
-    ; !CameraAcceleration    = #$0000
-    ; !CameraSubAcceleration = #$3000
-    ; !CameraMaxSpeed        = #$000F
-
-    ; My preferred settings:
-    ; !ScreenFadeDelay       = #$0004
-    ; !CameraAcceleration    = #$0001
-    ; !CameraSubAcceleration = #$0000
-    ; !CameraMaxSpeed        = #$000F
 
     ; Constants - don't touch
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
