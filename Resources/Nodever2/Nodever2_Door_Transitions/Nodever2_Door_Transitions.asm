@@ -3,20 +3,22 @@ lorom
 math round off
 math pri on
 
-; todo:
-; test doors on screen edges and doors not touching any screen border / etc - basically "door glitch fix" patch should either be compatible with mine or my code should also have that bug fixed
-; also I think that maxspeed isn't strictly obeyed and the game can *technically* exceed it as it continues to accelerate for 1 frame past it. if you have high accel values this is a problem right?
-; doors can still snap into place on any speed value when aligning - state 7 is an example
-; testing - ceres broke when leaving ridleys room and running through the hallway after
-; testing - also broke the screen when leaving early supers room in much the same way.
-; I'd also like to see if there's anything I can do about the black lines that show when the door is moving... most prevalent in vertical doors
-; there is still a bug with layer 2 - see green brin fireflea room
+; roadmap/ideas:
+; 1.0:
+;  - parity with vanilla door transition functionality but with better/faster animation and customizability
+;  - fix layer 2 bugs (see green brin fireflea room)
+;  - fix dma flickering
+;  - figure out a way to make the patch error out or report if the speed is too high
+; 1.1:
+;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
+;  - place door transition tiles as close to the edge of the screen as you want
+; 1.2:
+;  - customization option to allow an option to NOT align the screen - could push this back to 1.1. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
+; 1.x:
+;  - async music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
-
-; There are a lot more edits I'd like to do... Namely - Figure out a way to load music in the background(?) and start doing so while the door is scrolling(?), remove any 1 frame delays between door state machine states.
-; When I release this, release presets: same speed as vanilla, and faster (my preferred settings)
 
 ; When I'm done i'd like to showcase the following patches side by side: the 3 variations of mine, vanilla, project base, redesign, and the kazuto hex tweaks.
 ; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, misalignments, etc...
@@ -44,9 +46,10 @@ math pri on
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !TransitionLength      = $002C   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
                                      ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
-    !TransitionAnimation        = 1  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
-                                     ;     1: make the screen move in a curve toward it's destination.
-                                     ;     2: make the screen move in a straight line toward it's destination.
+    !TransitionAnimation        = 2  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
+                                     ;     1: make the screen move in a straight line toward it's destination (alignment completes when transition is 100% complete).
+                                     ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 50% complete).
+                                     ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
     !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0  ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
@@ -70,6 +73,7 @@ math pri on
     !RamLayer2YPosition               = $0919
     !RamSamusXPosition                = $0AF6
     !RamSamusYPosition                = $0AFA
+    !RamSamusYRadius                  = $0B00
     !RamSamusXSubPosition             = $0AF8
     !RamSamusPrevXPosition            = $0B10
     !RamSamusPrevYPosition            = $0B14
@@ -130,6 +134,22 @@ math pri on
 
     ; so we recalculate BG1 X scroll based on layer 1 X pos every time we call the scrolling routine ($80A37B)
     ; HOWEVER, the offset between the two ($091D) somehow ended up with a 1 in it
+}
+
+; ====================================
+; ============== MACROS ==============
+; ====================================
+{
+    ; The ultimate cheat code: Making the assembler do all the work.
+    ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
+    ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
+    ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
+    ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
+    ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
+    ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
+    macro generateLookupTableEntry(t)
+        db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
+    endmacro
 }
 
 ; =======================================
@@ -488,27 +508,19 @@ if !VanillaCode == 0
         +   PLA : !tStackOffset := !tBaseStackOffset
 
             LDA !tCameraTableIndex : INC : STA !tCameraTableIndex
-            if !TransitionAnimation == 1
+            if !TransitionAnimation == 2 || !TransitionAnimation == 3
                 LDA !tPrimaryDirectionFlag : BNE +
                 ; we are in the secondary direction, increment counter again to animate faster
-                LDA !tCameraTableIndex : INC #1 : STA !tCameraTableIndex
+                LDA !tCameraTableIndex
+                INC
+                if !TransitionAnimation == 3 : INC : endif
+                STA !tCameraTableIndex
             +
             endif
         .return
             PLB : PLA : PLY : PLX : PLP : CLC : RTS ; return, not complete
 
-        ; The ultimate cheat code: Making the assembler do all the work.
-        ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
-        ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
-        ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
-        ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
-        ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
-        ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
         .lookupTable:
-        macro generateLookupTableEntry(t)
-            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
-        endmacro
-        print "BezierTest_lookupTable: ", pc
         !tCounter = 0
         while !tCounter < !TransitionLength
             %generateLookupTableEntry(!tCounter)
@@ -559,8 +571,8 @@ if !VanillaCode == 0
 ; ============== DOOR TRANSITION LOADING - POSITION SAMUS ==============
 ; ======================================================================
 {
-    org $82E4C5 : JSL PositionSamus
-    org $82E3CF : BRA SkipPlacingSamus
+    ;org $82E4C5 : JSL PositionSamus
+    org $82E3CF : JSL PositionSamus : BRA SkipPlacingSamus
     org $82E3E2
         SkipPlacingSamus:
 
@@ -624,11 +636,89 @@ if !VanillaCode == 0
         .finish
             LDA !RamSamusXPosition : STA !RamSamusPrevXPosition
             LDA !RamSamusYPosition : STA !RamSamusPrevYPosition
-            JSL $89AB82 ; instruction replaced by hijack - Load FX header
+            ;JSL $89AB82 ; instruction replaced by hijack - Load FX header
             PLB : PLP : PLX : RTL
         .freespace
     }
     !FreespaceAnywhere := PositionSamus_freespace
+    warnpc !FreespaceAnywhereEnd
+}
+
+; ==================================================================
+; ============== DOOR TRANSITION VRAM UPDATE POSITION ==============
+; ==================================================================
+{
+    ; This is to address the black flickering.
+    ; Low v-counter targets (high ones are at the end of HUD so no need to adjust them). Vanilla: A0h
+    org $8097A2 : LDY #$00A0 ; vertical
+    org $809803 : LDY #$00A0 ; horizontal
+
+    org $809793
+        JSR CheckIfVramUpdateNeeded_vertical_topOfScreen
+
+    org $8097B4
+        JSR CheckIfVramUpdateNeeded_vertical_bottomOfScreen
+
+
+    org $8097FC
+        JSR CheckIfVramUpdateNeeded_horizontal_topOfScreen
+        NOP
+
+    org $80980F
+        JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
+    
+    org !Freespace80
+    CheckIfVramUpdateNeeded: {
+        .vertical
+        ..topOfScreen
+            LDA !RamLayer1YPosition : AND #$00FF : CMP #$0090 : BPL +
+            JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
+        +   RTS
+        ..bottomOfScreen
+            PHA ; need to preserve A here
+            LDA !RamLayer1YPosition : AND #$00FF : CMP #$0090 : BMI +
+            ; Door tube is high - execute VRAM update now if needed.
+            LDX $05BC : BPL + : JSR $9632
+        +   PLA
+            LDY #$0000 ; instruction replaced by hijack
+            RTS
+
+        .horizontal
+        ; note: the constants here in the CMP are werid, they are like distance from the bottom of the screen, not distance from top.
+        ..topOfScreen
+            LDA !RamLayer1YPosition : PHA
+            LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BMI +
+            ; Samus is low - execute VRAM update now if needed.
+            LDX $05BC : BPL + : JSR $9632
+        +   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
+            PLA : RTS
+        ..bottomOfScreen
+            LDA !RamLayer1YPosition : PHA
+            LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BPL +
+            JSR $9632 ; Samus is high - execute VRAM update now. (Caller already checked if it's needed.)
+        +   PLA : RTS
+
+        .truncateNegative:
+            EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
+
+        ; samus' screen position =
+        ; (samus pos AND #$00FF) - (layer 1 pos AND #$00FF)
+
+        ; the below works great when you assume the door cap is in the middle of the screen... ugh.
+        ;.horizontal
+        ;..topOfScreen
+        ;    LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BMI +
+        ;    ; Screen is moving down - execute VRAM update now if needed.
+        ;    LDX $05BC : BPL + : JSR $9632
+        ;+   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
+        ;    RTS
+        ;..bottomOfScreen
+        ;    LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BPL +
+        ;    JSR $9632 ; Screen is moving up - execute VRAM update now. (Caller already checked if it's needed.)
+        ;+   RTS
+        .freespace
+    }
+    !Freespace80 := CheckIfVramUpdateNeeded_freespace
     warnpc !FreespaceAnywhereEnd
 }
 
