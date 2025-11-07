@@ -1,5 +1,7 @@
 lorom
 
+warnings disable Wfeature_deprecated
+
 math round off
 math pri on
 
@@ -9,6 +11,8 @@ math pri on
 ;  - fix layer 2 bugs (see green brin fireflea room)
 ;  - fix dma flickering
 ;  - figure out a way to make the patch error out or report if the speed is too high
+;  - when H door is centered, flashing is intersecting escape timer...
+;  - can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 ; 1.1:
 ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
 ;  - place door transition tiles as close to the edge of the screen as you want
@@ -24,7 +28,7 @@ math pri on
 ; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, misalignments, etc...
 
 ; by Nodever2 October 2025
-; Works with Asar (written with metconst fork of asar 1.90), won't work with xkas
+; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
 ; Please give credit if you use this patch.
 
 ; This patch was also made possible by:

@@ -65,8 +65,8 @@ def main():
     for filename in os.listdir(asm_folderpath):
         file = Path(asm_folderpath + "\\" + filename)
         if file.suffix.lower() == ".asm":
-            print(file.resolve())
-            result = subprocess.run(args = ["asar", "--no-title-check", "--fix-checksum=off", "-wnoWfeature_deprecated", "--symbols=wla", "--symbols-path=" + generated_symbols_folderpath + "\\" + file.stem + ".sym", file.resolve(), hack_filepath])
+            print(file.resolve()) # "-wnoWfeature_deprecated"
+            result = subprocess.run(args = ["asar", "--no-title-check", "--fix-checksum=off", "--symbols=wla", "--symbols-path=" + generated_symbols_folderpath + "\\" + file.stem + ".sym", file.resolve(), hack_filepath])
             if result.returncode != 0:
                 handleError()
     print()
