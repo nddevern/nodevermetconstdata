@@ -655,7 +655,7 @@ if !VanillaCode == 0
 ; ==================================================================
 ; ============== DOOR TRANSITION VRAM UPDATE POSITION ==============
 ; ==================================================================
-{
+{   ; This section is to address the black flickering during the door transition - position it so that it never overlaps the door tube, under any circumstances.
     ; When Samus collides with a door tile, find the top door tile of the door that has been collided with:
     org $9493A7
         JSL FindTopOfDoor
@@ -675,17 +675,10 @@ if !VanillaCode == 0
             SEC : SBC !RamRoomWidthInBlocks : STA !RamCurrentBlockIndex
             DEY : BNE .loop
         .done
-            ; Going to manually divide this because.. I must have been using the hardware registers wrong?? this is what I tried first and it was giving me wrong results:
-            ;LDA !RamHDoorTopBlockYPosition : STA $4204                     ; Dividend
-            ;SEP #$20 : LDA !RamRoomWidthInBlocks : STA $4206 : REP #$20 ; Divisor
-            ;PHA : PLA : PHA : PLA                                       ; Wait for division
-            ;LDA $4216 : ASL #4                                          ; A = block X in pixel coordinates
-            ;STA !RamHDoorTopBlockYPosition
-
-            ; RamHDoorTopBlockYPosition holds block index instead of the Y position. Convert it to Y pixel coordinate.
-            LDA !RamHDoorTopBlockYPosition
-            LDX #$FFFF
-        -   INX : SEC : SBC !RamRoomWidthInBlocks : BPL -              ; X = A / !RoomWidthInBlocks
+            ; RamHDoorTopBlockYPosition holds block index instead of the Y position. Convert it to Y pixel coordinate for later use.
+            LDA !RamHDoorTopBlockYPosition                             ;\
+            LDX #$FFFF                                                 ;) X = Y position of top of door tube, in blocks. (!RamHDoorTopBlockYPosition / !RoomWidthInBlocks)
+        -   INX : SEC : SBC !RamRoomWidthInBlocks : BPL -              ;/
             TXA : ASL #4 : AND #$00FF : STA !RamHDoorTopBlockYPosition ; !RamHDoorTopBlockYPosition = Y position of door in pixels relative to the screen
 
             PLA : STA !RamCurrentBlockIndex
@@ -695,8 +688,7 @@ if !VanillaCode == 0
     }
     !FreespaceAnywhere := FindTopOfDoor_freespace
     warnpc !FreespaceAnywhereEnd
-
-    ; This is to address the black flickering.
+    
     ; Low v-counter targets (high ones are at the end of HUD so no need to adjust them). Vanilla: A0h
     org $8097A2 : LDY #$00A0 ; vertical
     org $809803 : LDY #$00A0 ; horizontal
@@ -733,8 +725,8 @@ if !VanillaCode == 0
 
         .horizontal
         ..topOfScreen
-            ; Door is low - move down if needed.
             JSR ..compareYPosition : BMI +
+            ; Door is low - move down if needed.
             LDX $05BC : BPL + : JSR $9632
         +   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
             RTS
@@ -748,43 +740,6 @@ if !VanillaCode == 0
             PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
             RTS
 
-        ;..truncateNegative:
-            ;EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
-
-        ; the below looks at samus' position, which is unfortauntely not precise enough.
-        ;.horizontal
-        ;; note: the constants here in the CMP are werid, they are like distance from the bottom of the screen, not distance from top.
-        ;..topOfScreen
-        ;    LDA !RamLayer1YPosition : PHA
-        ;    LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BMI +
-        ;    ; Samus is low - execute VRAM update now if needed.
-        ;    LDX $05BC : BPL + : JSR $9632
-        ;+   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
-        ;    PLA : RTS
-        ;..bottomOfScreen
-        ;    LDA !RamLayer1YPosition : PHA
-        ;    LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BPL +
-        ;    JSR $9632 ; Samus is high - execute VRAM update now. (Caller already checked if it's needed.)
-        ;+   PLA : RTS
-        ;
-        ;.truncateNegative:
-        ;    EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
-
-        ; samus' screen position =
-        ; (samus pos AND #$00FF) - (layer 1 pos AND #$00FF)
-
-        ; the below works great when you assume the door cap is in the middle of the screen... ugh.
-        ;.horizontal
-        ;..topOfScreen
-        ;    LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BMI +
-        ;    ; Screen is moving down - execute VRAM update now if needed.
-        ;    LDX $05BC : BPL + : JSR $9632
-        ;+   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
-        ;    RTS
-        ;..bottomOfScreen
-        ;    LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BPL +
-        ;    JSR $9632 ; Screen is moving up - execute VRAM update now. (Caller already checked if it's needed.)
-        ;+   RTS
         .freespace
     }
     !Freespace80 := CheckIfVramUpdateNeeded_freespace
