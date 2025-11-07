@@ -79,6 +79,11 @@ math pri on
     !RamSamusPrevYPosition            = $0B14
     !RamPreviousLayer1YBlock          = $0901
     !RamPreviousLayer2YBlock          = $0905
+    !RamRoomWidthInBlocks             = $07A5
+    !RamCurrentBlockIndex             = $0DC4
+    !RamDoorBts                       = $078F
+    !RamLevelDataArray                = $7F0002 ; 1 word per block. High 4 bits = block type.
+    !RamBtsArray                      = $7F6402 ; 1 byte per block
     !RamDoorDirection                 = $0791
     ;{
     ;    0: Right
@@ -102,6 +107,9 @@ math pri on
     !RamLayer2YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+
+    !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    
 
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
@@ -648,6 +656,46 @@ if !VanillaCode == 0
 ; ============== DOOR TRANSITION VRAM UPDATE POSITION ==============
 ; ==================================================================
 {
+    ; When Samus collides with a door tile, find the top door tile of the door that has been collided with:
+    org $9493A7
+        JSL FindTopOfDoor
+
+    org !FreespaceAnywhere
+    FindTopOfDoor: {
+            PHY : PHX
+            LDA !RamCurrentBlockIndex : PHA
+            LDY #$0004 ; max # of blocks to check
+        .loop
+            LDA !RamCurrentBlockIndex : ASL : TAX
+            LDA !RamLevelDataArray,x : AND #$F000 : CMP #$9000 : BNE .done ; If the block type is different, stop
+            LDA !RamCurrentBlockIndex : TAX
+            LDA !RamBtsArray,x : AND #$00FF : CMP !RamDoorBts : BNE .done  ; If the BTS is different, stop
+        .found
+            TXA : STA !RamHDoorTopBlockYPosition
+            SEC : SBC !RamRoomWidthInBlocks : STA !RamCurrentBlockIndex
+            DEY : BNE .loop
+        .done
+            ; Going to manually divide this because.. I must have been using the hardware registers wrong?? this is what I tried first and it was giving me wrong results:
+            ;LDA !RamHDoorTopBlockYPosition : STA $4204                     ; Dividend
+            ;SEP #$20 : LDA !RamRoomWidthInBlocks : STA $4206 : REP #$20 ; Divisor
+            ;PHA : PLA : PHA : PLA                                       ; Wait for division
+            ;LDA $4216 : ASL #4                                          ; A = block X in pixel coordinates
+            ;STA !RamHDoorTopBlockYPosition
+
+            ; RamHDoorTopBlockYPosition holds block index instead of the Y position. Convert it to Y pixel coordinate.
+            LDA !RamHDoorTopBlockYPosition
+            LDX #$FFFF
+        -   INX : SEC : SBC !RamRoomWidthInBlocks : BPL -              ; X = A / !RoomWidthInBlocks
+            TXA : ASL #4 : AND #$00FF : STA !RamHDoorTopBlockYPosition ; !RamHDoorTopBlockYPosition = Y position of door in pixels relative to the screen
+
+            PLA : STA !RamCurrentBlockIndex
+            PLX : PLY
+            LDA $8F0000,x : RTL ; instruction replaced by hijack
+        .freespace
+    }
+    !FreespaceAnywhere := FindTopOfDoor_freespace
+    warnpc !FreespaceAnywhereEnd
+
     ; This is to address the black flickering.
     ; Low v-counter targets (high ones are at the end of HUD so no need to adjust them). Vanilla: A0h
     org $8097A2 : LDY #$00A0 ; vertical
@@ -684,22 +732,43 @@ if !VanillaCode == 0
             RTS
 
         .horizontal
-        ; note: the constants here in the CMP are werid, they are like distance from the bottom of the screen, not distance from top.
         ..topOfScreen
-            LDA !RamLayer1YPosition : PHA
-            LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BMI +
-            ; Samus is low - execute VRAM update now if needed.
+            ; Door is low - move down if needed.
+            JSR ..compareYPosition : BMI +
             LDX $05BC : BPL + : JSR $9632
         +   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
-            PLA : RTS
+            RTS
         ..bottomOfScreen
-            LDA !RamLayer1YPosition : PHA
-            LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BPL +
-            JSR $9632 ; Samus is high - execute VRAM update now. (Caller already checked if it's needed.)
-        +   PLA : RTS
+            JSR ..compareYPosition : BPL +
+            JSR $9632 ; Door is high - execute VRAM update now. (Caller already checked if it's needed.)
+        +   RTS
 
-        .truncateNegative:
-            EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
+        ..compareYPosition
+            LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
+            PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
+            RTS
+
+        ;..truncateNegative:
+            ;EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
+
+        ; the below looks at samus' position, which is unfortauntely not precise enough.
+        ;.horizontal
+        ;; note: the constants here in the CMP are werid, they are like distance from the bottom of the screen, not distance from top.
+        ;..topOfScreen
+        ;    LDA !RamLayer1YPosition : PHA
+        ;    LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BMI +
+        ;    ; Samus is low - execute VRAM update now if needed.
+        ;    LDX $05BC : BPL + : JSR $9632
+        ;+   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
+        ;    PLA : RTS
+        ;..bottomOfScreen
+        ;    LDA !RamLayer1YPosition : PHA
+        ;    LDA !RamSamusYPosition : CLC : ADC !RamSamusYRadius : SEC : SBC $01,s : CMP #$0080 : BPL +
+        ;    JSR $9632 ; Samus is high - execute VRAM update now. (Caller already checked if it's needed.)
+        ;+   PLA : RTS
+        ;
+        ;.truncateNegative:
+        ;    EOR #$FFFF : INC : AND #$00FF : EOR #$FFFF : INC : RTS
 
         ; samus' screen position =
         ; (samus pos AND #$00FF) - (layer 1 pos AND #$00FF)
@@ -719,7 +788,7 @@ if !VanillaCode == 0
         .freespace
     }
     !Freespace80 := CheckIfVramUpdateNeeded_freespace
-    warnpc !FreespaceAnywhereEnd
+    warnpc !Freespace80End
 }
 
 ; ========================================================
