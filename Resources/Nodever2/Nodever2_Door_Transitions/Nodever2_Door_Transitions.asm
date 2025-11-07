@@ -699,7 +699,6 @@ if !VanillaCode == 0
     org $8097B4
         JSR CheckIfVramUpdateNeeded_vertical_bottomOfScreen
 
-
     org $8097FC
         JSR CheckIfVramUpdateNeeded_horizontal_topOfScreen
         NOP
@@ -711,12 +710,12 @@ if !VanillaCode == 0
     CheckIfVramUpdateNeeded: {
         .vertical
         ..topOfScreen
-            LDA !RamLayer1YPosition : AND #$00FF : CMP #$0090 : BPL +
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL +
             JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
         +   RTS
         ..bottomOfScreen
-            PHA ; need to preserve A here
-            LDA !RamLayer1YPosition : AND #$00FF : CMP #$0090 : BMI +
+            PHA ; need to preserve A here due to the routine we hijacked
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI +
             ; Door tube is high - execute VRAM update now if needed.
             LDX $05BC : BPL + : JSR $9632
         +   PLA
