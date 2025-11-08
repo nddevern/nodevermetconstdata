@@ -135,9 +135,10 @@ math pri on
     ;  - when H door is centered, flashing is intersecting escape timer... fix
     ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
     ;  - place door transition tiles as close to the edge of the screen as you want
-    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too.
+    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too. add a linear scrolling option too.
     ;  - option to pad level data with zeroes to avoid seeing artifacts (in smaller rooms anyway) - ex moving upwards while screen not aligned out of post phantoon room shows artifacts.
     ;  - fix whatever caused me to get stuck in the wall in MB's room
+    ;  - and add an option for the door to align itself before doing main scrolling like vanilla,.
     ; 1.2 (tentative):
     ;  - customization option to allow an option to NOT align the screen - could push this back to 1.1. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
     ; 1.x:
