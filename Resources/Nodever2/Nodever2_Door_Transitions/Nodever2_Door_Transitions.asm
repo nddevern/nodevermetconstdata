@@ -5,36 +5,33 @@ warnings disable Wfeature_deprecated
 math round off
 math pri on
 
-; roadmap/ideas:
-; 1.0:
-;  - parity with vanilla door transition functionality but with better/faster animation and customizability
-;  - fix layer 2 bugs (see green brin fireflea room)
-;  - fix dma flickering
-;  - figure out a way to make the patch error out or report if the speed is too high
-;  - when H door is centered, flashing is intersecting escape timer...
-;  - can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
-; 1.1:
-;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
-;  - place door transition tiles as close to the edge of the screen as you want
-; 1.2:
-;  - customization option to allow an option to NOT align the screen - could push this back to 1.1. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
-; 1.x:
-;  - async music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff
-
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
-
-; When I'm done i'd like to showcase the following patches side by side: the 3 variations of mine, vanilla, project base, redesign, and the kazuto hex tweaks.
-; should test all kinds of doors - big rooms, little rooms, rooms with/without music transitions, misalignments, etc...
 
 ; by Nodever2 October 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
 ; Please give credit if you use this patch.
 
 ; This patch was also made possible by:
-;  * NobodyNada                       - Developer of asynchronous music transfer code
-;  * Kejardon, with bugfix from Maddo - Developer of Decompression Optimization
-;  * P.JBoy                           - Custodian of the commented Super Metroid bank logs
+;  * P.JBoy                           - Keeper of the commented Super Metroid bank logs
+;  * Tundain                          - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
+
+; Other patches you should use that were tested with this, that have no conflicts and work out of the box:
+;  * Decompression Optimization by Kejardon, with bugfix from Maddo - Included in this patch
+;     > This makes large rooms load faster.
+;
+;  * SPC Transfer Optimization by total - https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
+;     > This makes music load faster.
+;
+;  * Full Door Cap PLM Rewrite by Nodever2 - https://metroidconstruction.com/resource.php?id=562
+;     > This makes door caps a lot less annoying, you can't bonk on them as they're opening anymore alongside other improvements.
+
+; Version history:
+; 2025-11-07 v1.0: Initial release.
+;   * Known Issues:
+;      > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
+;      > Escape timer flickers during horizontal door transitions
+;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -47,18 +44,22 @@ math pri on
     !Freespace82End        = $82FFFF
     !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd  = $B8FFFF
+    !RamBank               = $7F0000
+    !RamStart             #= $FB46+!RamBank
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !TransitionLength      = $002C   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
                                      ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
     !TransitionAnimation        = 2  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
                                      ;     1: make the screen move in a straight line toward it's destination (alignment completes when transition is 100% complete).
                                      ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 50% complete).
-                                     ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
+                                     ;     3: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
+
+    ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
     !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0  ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
-    ; Constants - don't touch
+    ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
     !Freespace80ReportStart := !Freespace80
     !Freespace82ReportStart := !Freespace82
@@ -66,7 +67,7 @@ math pri on
     ; Vanilla variables
     !RamDoorTransitionFunctionPointer = $099C
     !RamGameState                     = $0998
-    !RamDoorTransitionFrameCounter    = $0925 ; for horizontal doors, 0 to !TransitionLength. vertical, 0 to !TransitionLength-1...
+    !RamDoorTransitionFrameCounter    = $0925
     !RamLayer1XPosition               = $0911
     !RamLayer1XSubPosition            = $090F
     !RamLayer1YPosition               = $0915
@@ -75,6 +76,14 @@ math pri on
     !RamLayer1YDestination            = $0929
     !RamLayer2XPosition               = $0917
     !RamLayer2YPosition               = $0919
+    !RamBG1XScroll                    = $B1
+    !RamBG1XOffset                    = $091D
+    !RamBG1YScroll                    = $B3
+    !RamBG1YOffset                    = $091F
+    !RamBG2XScroll                    = $B5
+    !RamBG2XOffset                    = $0921
+    !RamBG2YScroll                    = $B7
+    !RamBG2YOffset                    = $0923
     !RamSamusXPosition                = $0AF6
     !RamSamusYPosition                = $0AFA
     !RamSamusYRadius                  = $0B00
@@ -98,23 +107,16 @@ math pri on
     ;}
 
     ; new variables - can repoint the ram that these use
-    !RamBank                                      = $7F0000
-    !RamStart                                    #= $FB46+!RamBank
     !CurRamAddr                                  := !RamStart
-    
     !RamLayer1XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraXTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-
     !RamLayer1YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    
-
     !RamEnd                                      := !CurRamAddr
     undef "CurRamAddr"
 }
@@ -123,29 +125,22 @@ math pri on
 ; ============== NOTES  ==============
 ; ====================================
 {
-    ; Door transition code is in $82
-    ; H Door transition starts at 94:93B8 (collision with door BTS) and starts with:
-    ;  !RamGameState = 9 (E169 - door transition - delay)
-    ;  !RamDoorTransitionFunctionPointer = E17D HandleElevator
-
-    ; PJ had a comment indicating that this might help in some way but so far I haven't seen a consequence for it.
-    ;org $80A44E : LDX #$0000
-
-    ; more notes on scrolling routine
-    ; $08F7 - layer 1 X block
-    ; $0990 - blocks to update X block - this is the X coordinate of the column in layer 1 RAM we'll update. Basically just layer 1 X block, but if we're scrolling right, add 10h to it.
-    ; $0907 - BG1 X block. Current X coordinate in BG1, in blocks. Apparently this can just keep increasing. The actual X coordinate in the tilemap viewer is this % 20h in normal gameplay.
-    ; $0994 - Blocks to update X block. Basically just BG1 X block, but if we're scrolling right, it's BG1 X block + 10h.
-
-    ; Y blocks work the same way. BG1 Y block % 10h unlike BG1 X block which is % 20h.
-
-    ; it looks like BG1 X block got incremented while Layer1XBlock did not within a frame
-    ; This is because BG1XScroll and Layer1XPosition are out of sync by 1 pixel
-    ; $B1   - BG1 X Scroll (pixels)
-    ; $0911 - Layer 1 X position (pixels)
-
-    ; so we recalculate BG1 X scroll based on layer 1 X pos every time we call the scrolling routine ($80A37B)
-    ; HOWEVER, the offset between the two ($091D) somehow ended up with a 1 in it
+    ; roadmap/ideas:
+    ; 1.0:
+    ;  - Parity with vanilla door transition functionality but with better/faster animation and customizability
+    ;  - Fixed dma flickering - now, if you place doors not in the middle of the screen, they won't flicker at all during the transition, because I move the DMA Y position dynamically.
+    ; 1.1 (tentative):
+    ;  - figure out a way to make the patch error out or report if the speed is too fast
+    ;  - when H door is centered, flashing is intersecting escape timer... fix
+    ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
+    ;  - place door transition tiles as close to the edge of the screen as you want
+    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too.
+    ;  - option to pad level data with zeroes to avoid seeing artifacts (in smaller rooms anyway) - ex moving upwards while screen not aligned out of post phantoon room shows artifacts.
+    ;  - fix whatever caused me to get stuck in the wall in MB's room
+    ; 1.2 (tentative):
+    ;  - customization option to allow an option to NOT align the screen - could push this back to 1.1. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
+    ; 1.x:
+    ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
 }
 
 ; ====================================
@@ -253,7 +248,7 @@ if !VanillaCode == 0
     org $80AD30
     DoorTransitionScrollingSetup: {
             REP #$30
-            JSR InitializeLayer2Destinations ; This overwrites layer 1 positions but those will be corrected immediately after this
+            JSR InitializeLayer2Destinations
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
             JSR ($AE08,x) : RTL
     }
@@ -270,6 +265,18 @@ if !VanillaCode == 0
 
     org $80ADC8 : JSR DoorTransitionScrollingVerticalSetup   ;) Up
     org $80AE04 : JSR SetupScrolling                         ;/
+
+    org $80AE29
+    UpdateBGScrollOffsets: {
+        ; Difference between this and vanilla: BG2 offsets are based on layer 1 destination instead of layer 1 position
+        ; This was done because not aligning the door screwed this up compared to vanilla; this accounts for it.
+        LDA !RamBG1XScroll : SEC : SBC !RamLayer1XPosition : STA !RamBG1XOffset
+        LDA !RamBG1YScroll : SEC : SBC !RamLayer1YPosition : STA !RamBG1YOffset
+        LDA !RamBG2XScroll : SEC : SBC !RamLayer1XDestination : STA !RamBG2XOffset
+        LDA !RamBG2YScroll : SEC : SBC !RamLayer1YDestination : STA !RamBG2YOffset
+        RTS
+    }
+    warnpc $80AE4E
 
     org VanillaDownScrollingRoutineEnd ; newly free space
     DoorTransitionScrollingHorizontalSetup: {
@@ -359,7 +366,7 @@ if !VanillaCode == 0
             INC !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
-            JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; ; why do we call this twice? didn't really observe any effects from commenting this out (yet)
+            JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; why does vanilla call this twice? didn't really observe any effects from commenting this out (yet)
             SEC : RTS
         +   PLP : ++ : CLC : RTS
     }
@@ -468,7 +475,6 @@ if !VanillaCode == 0
         ; Assumes REP#$30 before calling
         ; Parameters listed below:
 
-        ; These defines account for the return addr on the stack, as well as PHP : PHX : PHA
         !tBaseStackOffset #= 1+2+1+2+2+2+1 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha, +2 for phy, +1 for phb
         !tStackOffset := !tBaseStackOffset
         !tLayer1StartPos                          = !tStackOffset+0,s
@@ -583,7 +589,6 @@ if !VanillaCode == 0
 ; ============== DOOR TRANSITION LOADING - POSITION SAMUS ==============
 ; ======================================================================
 {
-    ;org $82E4C5 : JSL PositionSamus
     org $82E3CF : JSL PositionSamus : BRA SkipPlacingSamus
     org $82E3E2
         SkipPlacingSamus:
@@ -648,7 +653,6 @@ if !VanillaCode == 0
         .finish
             LDA !RamSamusXPosition : STA !RamSamusPrevXPosition
             LDA !RamSamusYPosition : STA !RamSamusPrevYPosition
-            ;JSL $89AB82 ; instruction replaced by hijack - Load FX header
             PLB : PLP : PLX : RTL
         .freespace
     }
