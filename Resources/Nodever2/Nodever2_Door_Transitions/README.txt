@@ -46,9 +46,10 @@ Nodever2's Door Transitions
  * Kejardon_decompression_optimization.asm - This is another patch you can apply in the same way you applied mine. It makes loading rooms faster. It was made by kejardon with fixes from Maddo.
  * SPC Transfer Optimization by total - This patch makes loading music faster. Get it here: https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
  * Full Door Cap PLM Rewrite by Nodever2 - This makes door caps better, you can't bonk on them anymore and various other improvements. Get it here: https://metroidconstruction.com/resource.php?id=562
+ * Patch showcase video for this door transition patch: https://youtu.be/rkpMoOeFj3Y
 
 --- VERSION HISTORY: ---
- 2025-11-07 v1.0: Initial release.
+ 2025-11-08 v1.0: Initial release.
    * Known Issues:
       > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
       > Escape timer flickers during horizontal door transitions

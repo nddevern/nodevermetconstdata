@@ -7,14 +7,15 @@ math pri on
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
+;   Patch showcase video: https://youtu.be/rkpMoOeFj3Y
 
-; by Nodever2 October 2025
+; by Nodever2 November 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
 ; Please give credit if you use this patch.
 
 ; This patch was also made possible by:
-;  * P.JBoy                           - Keeper of the commented Super Metroid bank logs
-;  * Tundain                          - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
+;  * P.JBoy  - Keeper of the commented Super Metroid bank logs, without which this patch would not have been possible. https://patrickjohnston.org/bank/index.html
+;  * Tundain - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
 
 ; Other patches you should use that were tested with this, that have no conflicts and work out of the box:
 ;  * Decompression Optimization by Kejardon, with bugfix from Maddo - Included in this patch
@@ -27,7 +28,7 @@ math pri on
 ;     > This makes door caps a lot less annoying, you can't bonk on them as they're opening anymore alongside other improvements.
 
 ; Version history:
-; 2025-11-07 v1.0: Initial release.
+; 2025-11-08 v1.0: Initial release.
 ;   * Known Issues:
 ;      > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
 ;      > Escape timer flickers during horizontal door transitions
