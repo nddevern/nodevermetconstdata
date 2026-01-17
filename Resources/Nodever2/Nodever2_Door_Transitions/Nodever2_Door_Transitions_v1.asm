@@ -131,6 +131,7 @@ math pri on
     ;  - Parity with vanilla door transition functionality but with better/faster animation and customizability
     ;  - Fixed dma flickering - now, if you place doors not in the middle of the screen, they won't flicker at all during the transition, because I move the DMA Y position dynamically.
     ; 1.1 (tentative):
+    ;  - add a way to control where samus is placed in each transition if the user wants it to work that way
     ;  - figure out a way to make the patch error out or report if the speed is too fast
     ;  - when H door is centered, flashing is intersecting escape timer... fix
     ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
