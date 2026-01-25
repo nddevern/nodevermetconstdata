@@ -63,7 +63,7 @@ lorom
         STA !RamSamusHealth
     .return
         PLX : PLP : RTL
-    print "DealDamageEnd: ", pc
+    ;print "DealDamageEnd: ", pc
     warnpc $91DF80
 }
 
