@@ -12,10 +12,8 @@ from datetime import datetime
 # 3. You have added asar and floating IPS to your system's PATH variable.
 # Notes: 1. This script creates a folder called "Symbols" in the same directory as itself. Feel free to add any symbol files you'd like into it.
 #           The script also creates a subfolder at "Symbols\AUTO_GENERATED" and will automatically generate symbols for your asm files there.
-#           TODO: The script will then merge all of these symbol files into an output file that you can drag into your debugger and see everything there.
+#           The script will then merge all of these symbol files into an output file that you can drag into your debugger and see everything there.
 #        2. Modify the script_directory variable to move the directoy where all of this is happening to be somewhere other than the same directory as this script.
-
-# todo: the msl file works if you change the extension to mlb. but that prese
 
 HACK_FILENAME = "Hack.smc"
 VANILLA_FILENAME = "Super Metroid (JU) [!].smc"
@@ -72,13 +70,13 @@ def main():
                 handleError()
     print()
 
-    #current_step += 1
-    #print("========= [" + str(current_step) + "] Importing SMART Data to ROM =========")
-    #print()
-    #smartargs = ["SMART.exe", "import", "|", "findstr", "\"^\""]
-    #print(smartargs)
-    #subprocess.run(smartargs)
-    #print()
+#    current_step += 1
+#    print("========= [" + str(current_step) + "] Importing SMART Data to ROM =========")
+#    print()
+#    smartargs = ["SMART.exe", "import", "|", "findstr", "\"^\""]
+#    print(smartargs)
+#    subprocess.run(smartargs)
+#    print()
 
     current_step += 1
     print("=========== [" + str(current_step) + "] Combining Symbol Files ============")
