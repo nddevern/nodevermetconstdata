@@ -34,7 +34,7 @@ math pri on
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 ; 2026-02-?? v?.?:
-;   * Added option !PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet9 for the suggestion.
+;   * Added option !PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
 ;   * TODO: Added new transition animation options?
 
 ; =================================================
