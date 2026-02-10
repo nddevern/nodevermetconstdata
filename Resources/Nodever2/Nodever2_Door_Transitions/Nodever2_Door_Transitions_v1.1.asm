@@ -33,6 +33,9 @@ math pri on
 ;      > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
+; 2026-02-?? v?.?:
+;   * Added option !PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet9 for the suggestion.
+;   * TODO: Added new transition animation options?
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -54,6 +57,14 @@ math pri on
                                      ;     1: make the screen move in a straight line toward it's destination (alignment completes when transition is 100% complete).
                                      ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 50% complete).
                                      ;     3: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
+    !PlaceSamusAlgorithm        = 1  ; Determines which algorithm is used to place Samus after a door transition:
+                                     ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
+                                     ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
+                                     ;     3: The door distance to spawn value is a hardcoded pixel offset from the edge of the screen.
+                                     ;     4: Advanced mode - Uses extra !FreespaceAnywhere. Different values in the door distance to spawn have different behavior:
+                                     ;        0000-8000: Vanilla behavior, i.e. algorithm 1.
+                                     ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
+                                     ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
@@ -119,6 +130,9 @@ math pri on
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamEnd                                      := !CurRamAddr
+
+    ; note/todo: we can use 092b and 092d if we just stop the game from setting them
+
     undef "CurRamAddr"
 }
 
@@ -602,61 +616,144 @@ if !VanillaCode == 0
             PHX : PHP : PHB
             REP #$30
 
+            if !PlaceSamusAlgorithm == 1
+                JMP .vanilla
+            endif
+            if !PlaceSamusAlgorithm == 2
+                ; mine
+            endif
+            if !PlaceSamusAlgorithm == 3
+                BRA .directOffset
+            endif
+            if !PlaceSamusAlgorithm == 4
+                LDX $078D : LDA $830008,x ; A = [$83:0000 + [door pointer] + 8] (distance to spawn)
+                BPL .vanilla
+                CMP #$8000 : BEQ .vanilla
+                CMP #$FFFF : BNE .directOffset
+                ; else, mine
+            endif
+
+        
+        if !PlaceSamusAlgorithm == 2 || !PlaceSamusAlgorithm == 4
+        .mine
             ; first set Samus to correct screen
-            LDA !RamLayer1XDestination : AND #$FF00 : PHA : LDA !RamSamusXPosition : AND #$00FF : ORA $01,s : STA !RamSamusXPosition : PLA
-            LDA !RamLayer1YDestination : AND #$FF00 : PHA : LDA !RamSamusYPosition : AND #$00FF : ORA $01,s : STA !RamSamusYPosition : PLA
+            JSR .mySetSamusScreenX
+            JSR .mySetSamusScreenY
 
             ; then set her position on the screen
-            LDA $0791   ;\
-            ASL A       ;|
+            LDA !RamDoorDirection
+            ASL A       ;\
             CLC         ;|
             ADC #$E68A  ;) A = [$E68A + [door direction] * 2] (PLM ID)
             TAX         ;|
             LDA $0000,x ;/
-            BNE .doorcap ; If door has door cap, use it's X and Y positions to set Samus
-            ; else... make some assumptions.
-        .nodoorcap
-            LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
-        ..horizontalTransition
+            BNE ..doorcap ; If door has door cap, use it's X and Y positions to set Samus
+            ; else, use my defaults:
+        ..nodoorcap
+            LDA !RamDoorDirection : BIT #$0002 : BNE ...verticalTransition
+        ...horizontalTransition
             LDA !RamLayer1XDestination : STA !RamSamusXPosition
-            LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingRight
-        ...samusMovingLeft
-            LDA !RamSamusXPosition : CLC : ADC #$0100-$30 : STA !RamSamusXPosition
-            BRA ..continue
-        ...samusMovingRight
-            LDA !RamSamusXPosition : CLC : ADC #$0030 : STA !RamSamusXPosition
-            BRA ..continue
-        ..verticalTransition
+            BRA ...continue
+        ...verticalTransition
             LDA !RamLayer1YDestination : STA !RamSamusYPosition
-            LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingDown
-        ...samusMovingUp
-            LDA !RamSamusYPosition : CLC : ADC #$0100-$1C : STA !RamSamusYPosition
-            BRA ..continue
-        ...samusMovingDown
-            LDA !RamSamusYPosition : CLC : ADC #$0040 : STA !RamSamusYPosition
-        ..continue
-            BRA .finish
+        ...continue
+            LDX !RamDoorDirection : AND #$0003
+            LDA .defaults_mine : JSR .moveSamus
+            JMP .finish
 
-        .doorcap
+        ..doorcap
             LDX $078D : LDA $830004,x : TAX ; X = [$83:0000 + [door pointer] + 4] (X and Y positions)
-            LDA !RamDoorDirection : AND #$0003 : BIT #$0002 : BNE ..verticalTransition
-        ..horizontalTransition
+            LDA !RamDoorDirection : AND #$0003 : BIT #$0002 : BNE ...verticalTransition
+        ...horizontalTransition
             LDA !RamLayer1XDestination : STA !RamSamusXPosition
             TXA : AND #$000F : ASL #4 : ORA !RamSamusXPosition : STA !RamSamusXPosition
-            BRA .finish
-        ..verticalTransition
+            BRA ...continue
+        ...verticalTransition
             LDA !RamLayer1YDestination : STA !RamSamusYPosition
             TXA : XBA : AND #$000F : ASL #4 : ORA !RamSamusYPosition : STA !RamSamusYPosition
-            LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingDown
-        ...samusMovingUp
+            LDA !RamDoorDirection : BIT #$0001 : BEQ ....samusMovingDown
+        ....samusMovingUp
             LDA !RamSamusYPosition : SEC : SBC #$0038 : STA !RamSamusYPosition
-            BRA .finish
-        ...samusMovingDown
+            BRA ...continue
+        ....samusMovingDown
             LDA !RamSamusYPosition : CLC : ADC #$0010 : STA !RamSamusYPosition
+        ...continue
+            JMP .finish
+        endif
+
+        if !PlaceSamusAlgorithm == 1 || !PlaceSamusAlgorithm == 4
+        .vanilla
+            LDX $078D : LDA $830008,x ; A = [$83:0000 + [door pointer] + 8] (distance to spawn)
+            TAX : BPL + ; If negative, use default values
+            LDX #$0180 ; Vertical default
+            LDA !RamDoorDirection : BIT #$0002 : BNE + ;\
+            LDX #$00C8                                 ;) If horizontal door, use horizontal default
+        +   TXA ; A and X contain door distance to spawn or default
+            LSR #2 : PHA ; Convert vanilla door distance to spawn to pixels (vertical doors still need adjustment)
+            LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
+        ..horizontalTransition
+            LDA !RamSamusXPosition : AND #$00FF : CLC : ADC !RamLayer1XStartPos : STA !RamSamusXPosition ; vanilla code to set samus to correct screen
+            JSR .mySetSamusScreenY
+            PLX : JSR .moveSamus
+            LDA !RamDoorDirection : BIT #$0001 : BEQ ...samusMovingRight
+        ...samusMovingLeft
+            LDA #$0007 : TRB !RamSamusXPosition ; Samus X position &= ~7
+            BRA .finish
+        ...samusMovingRight
+            LDA #$0007 : TSB !RamSamusXPosition ; Samus X position |= 7
+            BRA .finish
+        ..verticalTransition
+            LDA $01,s : LSR #3 : EOR #$FFFF : INC : CLC : ADC $01,s : STA $01,s ; Fix distance to door -> pixel conversion inaccuracy for vertical doors (remove 1/8th of the distance, since 38h is 7/8ths of 40h - see vanilla $82DE12)
+            LDA !RamSamusYPosition : AND #$00FF : CLC : ADC !RamLayer1YStartPos : STA !RamSamusYPosition ; vanilla code to set samus to correct screen
+            JSR .mySetSamusScreenX
+            PLX : JSR .moveSamus
+            BRA .finish
+        endif
+
+        if !PlaceSamusAlgorithm == 3 || !PlaceSamusAlgorithm == 4
+        .directOffset
+            JSR .mySetSamusScreenX
+            JSR .mySetSamusScreenY
+            LDX $078D : LDA $830008,x ; A = [$83:0000 + [door pointer] + 8] (distance to spawn)
+            AND #$7FFF
+            JSR .moveSamus
+            BRA .finish
+        endif
+
         .finish
             LDA !RamSamusXPosition : STA !RamSamusPrevXPosition
             LDA !RamSamusYPosition : STA !RamSamusPrevYPosition
             PLB : PLP : PLX : RTL
+
+        ; input: X = distance to move
+        .moveSamus
+            LDA !RamDoorDirection : BIT #$0001 : BEQ +
+            TXA : EOR #$FFFF : INC : TAX
+        +   PHX
+            LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
+        ..horizontalTransition
+            PLA : CLC : ADC !RamSamusXPosition : STA !RamSamusXPosition
+            RTS
+        ..verticalTransition
+            PLA : CLC : ADC !RamSamusYPosition : STA !RamSamusYPosition
+            RTS
+        
+        .mySetSamusScreenX
+            LDA !RamLayer1XDestination : AND #$FF00 : PHA : LDA !RamSamusXPosition : AND #$00FF : ORA $01,s : STA !RamSamusXPosition : PLA
+            RTS
+        
+        .mySetSamusScreenY
+            LDA !RamLayer1YDestination : AND #$FF00 : PHA : LDA !RamSamusYPosition : AND #$00FF : ORA $01,s : STA !RamSamusYPosition : PLA
+            RTS
+
+        .defaults ; right, left, down, up
+        ..mine
+        if !PlaceSamusAlgorithm == 2 || !PlaceSamusAlgorithm == 4
+            dw $0030 ; right
+            dw ($0100-$30)*-1 ; left
+            dw $0040 ; down
+            dw ($0100-$1C)*-1 ; up
+        endif
         .freespace
     }
     !FreespaceAnywhere := PositionSamus_freespace
