@@ -607,7 +607,7 @@ if !VanillaCode == 0
 ; ======================================================================
 {
     org $82E3CF : JSL PositionSamus : BRA SkipPlacingSamus
-    org $82E3E2
+    org $82E3E5
         SkipPlacingSamus:
 
     org !FreespaceAnywhere
@@ -807,9 +807,8 @@ if !VanillaCode == 0
     org $8097B4
         JSR CheckIfVramUpdateNeeded_vertical_bottomOfScreen
 
-    org $8097FC
+    org $8097F7
         JSR CheckIfVramUpdateNeeded_horizontal_topOfScreen
-        NOP
 
     org $80980F
         JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
@@ -835,7 +834,7 @@ if !VanillaCode == 0
             JSR ..compareYPosition : BMI +
             ; Door is low - move down if needed.
             LDX $05BC : BPL + : JSR $9632
-        +   JSL $80AE4E ; instruction replaced by hijack - Door transition scrolling function
+        +   LDA $9031 ; instruction replaced by hijack
             RTS
         ..bottomOfScreen
             JSR ..compareYPosition : BPL +
