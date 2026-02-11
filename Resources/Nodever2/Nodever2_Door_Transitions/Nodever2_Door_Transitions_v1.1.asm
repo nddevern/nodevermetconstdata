@@ -60,8 +60,9 @@ math pri on
     !RamBank               = $7F0000
     !RamStart             #= $FB46+!RamBank
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
-    !TransitionLength      = $002C   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
-                                     ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
+    !PrimaryScrollDuration = $002C   ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster.
+                                     ;     Note: We generate a lookup table ScrollDuration entries long, so the larger the number, the more freespace used.
+    !SecondaryScrollDuration = !PrimaryScrollDuration/2
     
     ; TODO: remove this deprecated option below.
     ; Instead we need to have a seperate set of options for primary and secondary direction:
@@ -190,7 +191,7 @@ math pri on
 ; ====================================
 {
     ; The ultimate cheat code: Making the assembler do all the work.
-    macro generateLookupTableEntry(t)
+    macro generateLookupTableEntry(t, ScrollType)
         if !PrimaryScrollCurve == 1
             ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
             ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
@@ -198,7 +199,7 @@ math pri on
             ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
             ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
             ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
-            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
+            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!<ScrollType>ScrollDuration))
         endif
         if !PrimaryScrollCurve == 2
             db $100*(<t>/!TransitionLength)
@@ -569,15 +570,23 @@ if !VanillaCode == 0
             TAY ; Y contains distance between start and end of transition
             
             LDA !tLayer1Position : CMP !tLayer1Destination : BEQ .finish
-            LDA !tCameraTableIndex : CMP #!TransitionLength-1 : BMI .continue
+            
+            LDA !tPrimaryDirectionFlag : BNE +
+            LDA #!SecondaryScrollDuration-1 : BRA ++
+        +   LDA #!PrimaryScrollDuration-1
+        ++  CMP !tCameraTableIndex : BEQ .finish : BPL .continue
         .finish
             LDA !tLayer1Destination : STA !tLayer1Position
             LDA !tLayer2Destination : STA !tLayer2Position
             PLB : PLA : PLY : PLX : PLP : SEC : RTS ; done
         .continue
             PHK : PLB ; DB = current bank
-            LDA !tCameraTableIndex : TAX
-            LDA .lookupTable,x : AND #$00FF : BNE + : INC : +
+            
+            LDA !tPrimaryDirectionFlag : BNE +
+            LDA !tCameraTableIndex : TAX : LDA .lookupTables_secondary,x : BRA ++
+        +   LDA !tCameraTableIndex : TAX : LDA .lookupTables_primary,x
+        ++  AND #$00FF : BNE + : INC : +
+            
             PHA : !tStackOffset := !tBaseStackOffset+2
             
             ; $01,s contains the distance from the table
@@ -613,10 +622,17 @@ if !VanillaCode == 0
         .return
             PLB : PLA : PLY : PLX : PLP : CLC : RTS ; return, not complete
 
-        .lookupTable:
+        .lookupTables:
+        ..primary
         !tCounter = 0
-        while !tCounter < !TransitionLength
-            %generateLookupTableEntry(!tCounter)
+        while !tCounter < !PrimaryScrollDuration
+            %generateLookupTableEntry(!tCounter, Primary)
+            !tCounter #= !tCounter+1
+        endwhile
+        ..secondary
+        !tCounter = 0
+        while !tCounter < !SecondaryScrollDuration
+            %generateLookupTableEntry(!tCounter, Secondary)
             !tCounter #= !tCounter+1
         endwhile
 
