@@ -27,6 +27,15 @@ math pri on
 ;  * Full Door Cap PLM Rewrite by Nodever2 - https://metroidconstruction.com/resource.php?id=562
 ;     > This makes door caps a lot less annoying, you can't bonk on them as they're opening anymore alongside other improvements.
 
+; Terminology:
+;  * Door directions: A door direction is based on the direction Samus travels through it.
+;       For example, a right door is a door that Samus enters by walking to the right.
+;  * Primary vs secondary scrolling:
+;       Primray scrolling is when the screen scrolls in the same direction as the door.
+;       Secondary scrolling is when the screen scrolls perpendicularly to the primary direction.
+;       For example, if Samus enters a right door while the screen is too high or too low, the screen
+;       will scroll up or down to center itself (secondary scrolling) and to the right (primary scrolling).
+
 ; Version history:
 ; 2025-11-08 v1.0: Initial release.
 ;   * Known Issues:
@@ -53,10 +62,26 @@ math pri on
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !TransitionLength      = $002C   ; How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster for some reason.
                                      ;     Note: We generate a lookup table !TransitionLength entries long, so the larger the number, the more freespace used.
+    
+    ; TODO: remove this deprecated option below.
+    ; Instead we need to have a seperate set of options for primary and secondary direction:
+    ; length
+    ; scroll curve (this will have to be made an option)
+    ; etc. we will generate two LUTs for this instead of just one.
     !TransitionAnimation        = 2  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
                                      ;     1: make the screen move in a straight line toward it's destination (alignment completes when transition is 100% complete).
                                      ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 50% complete).
                                      ;     3: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
+
+    !TwoPhaseTransition = 2          ; Determines whether primray and secondary scrolling are handled sequentially (vanilla) or simultaneously.
+                                     ;     0: Primary and seconary scrolling occur simultaneously.
+                                     ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
+                                     ;     2: Primary scrolling first, then secondary scrolling.
+    
+    !PrimaryScrollCurve = 1          ; Determines how the screen accelerates/decelerates during primary scrolling.
+                                     ;     1: ease in ease out.
+                                     ;     2: linear, like vanilla.
+
     !PlaceSamusAlgorithm        = 1  ; Determines which algorithm is used to place Samus after a door transition:
                                      ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
                                      ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
@@ -165,14 +190,19 @@ math pri on
 ; ====================================
 {
     ; The ultimate cheat code: Making the assembler do all the work.
-    ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
-    ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
-    ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
-    ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
-    ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
-    ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
     macro generateLookupTableEntry(t)
-        db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
+        if !PrimaryScrollCurve == 1
+            ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
+            ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
+            ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
+            ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
+            ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
+            ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
+            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!TransitionLength))
+        endif
+        if !PrimaryScrollCurve == 2
+            db $100*(<t>/!TransitionLength)
+        endif
     endmacro
 }
 
@@ -369,6 +399,7 @@ if !VanillaCode == 0
             LDA !RamDoorTransitionFrameCounter
 
             BNE +
+            INC !RamDoorTransitionFrameCounter
             LDA !RamDoorDirection : AND #$0003 : CMP #$0002 : BNE +
             ; Seemingly, if we run this, we need to return and wait for next frame to actually scroll.
             ; Seems like the engine can only DMA 1 horizontal row of tiles onto the screen per frame.
@@ -376,8 +407,35 @@ if !VanillaCode == 0
             JSL DrawTopRowOfScreenForDownwardsTransition : INC !RamDoorTransitionFrameCounter : CLC : RTS
         +
 
-            JSL ScrollCameraX : PHP
-            JSL ScrollCameraY : PHP
+            if !TwoPhaseTransition > 0
+                LDA !RamDoorTransitionFrameCounter : CMP #$0001 : BNE +
+                ; these inital scrolls are a hack... otherwise we end up with black tiles in state 5.. blegh
+                ; TODO: figure out a better solution to this
+                ; (hint: it's going to suck. we have to fully reintroduce the old door transition function of scrolling screen to alignment.)
+                JSL ScrollCameraX : PHP
+                JSL ScrollCameraY : PHP
+                BRA ++
+            +   ; need to do secondary direction first, then primary direction
+                LDA !RamDoorDirection : BIT #$0002
+                if !TwoPhaseTransition == 1
+                    BNE +
+                endif
+                if !TwoPhaseTransition > 1
+                    BEQ +
+                endif
+                ; X direction is primary
+                JSL ScrollCameraY : PHP : BCC +++
+                JSL ScrollCameraX : +++ : PHP
+                BRA ++
+            +   ; Y direction is primary
+                JSL ScrollCameraX : PHP : BCC +++
+                JSL ScrollCameraY : +++ : PHP
+            ++  ; continue
+            endif
+            if !TwoPhaseTransition == 0
+                JSL ScrollCameraX : PHP
+                JSL ScrollCameraY : PHP
+            endif
 
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
             INC !RamDoorTransitionFrameCounter
