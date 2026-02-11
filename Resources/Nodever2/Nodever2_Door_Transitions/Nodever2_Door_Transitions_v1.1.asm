@@ -62,25 +62,20 @@ math pri on
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
     !PrimaryScrollDuration = $002C   ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster.
                                      ;     Note: We generate a lookup table ScrollDuration entries long, so the larger the number, the more freespace used.
-    !SecondaryScrollDuration = !PrimaryScrollDuration/2
+    !SecondaryScrollDuration #= !PrimaryScrollDuration/2 ; This affects the "path" of the scrolling when simultaneous scrolling is enabled.
     
-    ; TODO: remove this deprecated option below.
-    ; Instead we need to have a seperate set of options for primary and secondary direction:
+    ; TODO: need to have a seperate set of options for primary and secondary direction:
     ; length
     ; scroll curve (this will have to be made an option)
     ; etc. we will generate two LUTs for this instead of just one.
-    !TransitionAnimation        = 2  ; Affects how the screen moves when the door is not aligned to the middle of the screen. Both animations accelerate and decelerate smoothly.
-                                     ;     1: make the screen move in a straight line toward it's destination (alignment completes when transition is 100% complete).
-                                     ;     2: make the screen move in a curve toward it's destination (alignment completes when transition is 50% complete).
-                                     ;     3: make the screen move in a curve toward it's destination (alignment completes when transition is 25% complete).
 
-    !TwoPhaseTransition = 2          ; Determines whether primray and secondary scrolling are handled sequentially (vanilla) or simultaneously.
+    !TwoPhaseTransition = 0          ; Determines whether primray and secondary scrolling are handled sequentially (vanilla) or simultaneously.
                                      ;     0: Primary and seconary scrolling occur simultaneously.
                                      ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
                                      ;     2: Primary scrolling first, then secondary scrolling.
     
     !PrimaryScrollCurve = 1          ; Determines how the screen accelerates/decelerates during primary scrolling.
-                                     ;     1: ease in ease out.
+    !SecondaryScrollCurve = 1        ;     1: ease in ease out.
                                      ;     2: linear, like vanilla.
 
     !PlaceSamusAlgorithm        = 1  ; Determines which algorithm is used to place Samus after a door transition:
@@ -192,17 +187,17 @@ math pri on
 {
     ; The ultimate cheat code: Making the assembler do all the work.
     macro generateLookupTableEntry(t, ScrollType)
-        if !PrimaryScrollCurve == 1
+        if !<ScrollType>ScrollCurve == 1
             ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
             ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
             ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
             ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
             ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
             ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
-            db $100*((<t>/!TransitionLength)**2)*(3-2*(<t>/!<ScrollType>ScrollDuration))
+            db $100*((<t>/!<ScrollType>ScrollDuration)**2)*(3-2*(<t>/!<ScrollType>ScrollDuration))
         endif
-        if !PrimaryScrollCurve == 2
-            db $100*(<t>/!TransitionLength)
+        if !<ScrollType>ScrollCurve == 2
+            db $100*(<t>/!<ScrollType>ScrollDuration)
         endif
     endmacro
 }
@@ -572,8 +567,8 @@ if !VanillaCode == 0
             LDA !tLayer1Position : CMP !tLayer1Destination : BEQ .finish
             
             LDA !tPrimaryDirectionFlag : BNE +
-            LDA #!SecondaryScrollDuration-1 : BRA ++
-        +   LDA #!PrimaryScrollDuration-1
+            LDA.w #!SecondaryScrollDuration-1 : BRA ++
+        +   LDA.w #!PrimaryScrollDuration-1
         ++  CMP !tCameraTableIndex : BEQ .finish : BPL .continue
         .finish
             LDA !tLayer1Destination : STA !tLayer1Position
@@ -610,15 +605,6 @@ if !VanillaCode == 0
         +   PLA : !tStackOffset := !tBaseStackOffset
 
             LDA !tCameraTableIndex : INC : STA !tCameraTableIndex
-            if !TransitionAnimation == 2 || !TransitionAnimation == 3
-                LDA !tPrimaryDirectionFlag : BNE +
-                ; we are in the secondary direction, increment counter again to animate faster
-                LDA !tCameraTableIndex
-                INC
-                if !TransitionAnimation == 3 : INC : endif
-                STA !tCameraTableIndex
-            +
-            endif
         .return
             PLB : PLA : PLY : PLX : PLP : CLC : RTS ; return, not complete
 
