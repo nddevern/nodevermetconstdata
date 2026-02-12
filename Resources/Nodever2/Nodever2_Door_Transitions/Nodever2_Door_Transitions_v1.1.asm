@@ -60,14 +60,9 @@ math pri on
     !RamBank               = $7F0000
     !RamStart             #= $FB46+!RamBank
     !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
-    !PrimaryScrollDuration = $002C   ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). Should be at least 18h - I get graphical glitches when going any faster.
+    !PrimaryScrollDuration = $002C   ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). If you make it too low you'll get graphical glitches - bare minimum is close to 18h.
                                      ;     Note: We generate a lookup table ScrollDuration entries long, so the larger the number, the more freespace used.
-    !SecondaryScrollDuration #= !PrimaryScrollDuration/2 ; This affects the "path" of the scrolling when simultaneous scrolling is enabled.
-    
-    ; TODO: need to have a seperate set of options for primary and secondary direction:
-    ; length
-    ; scroll curve (this will have to be made an option)
-    ; etc. we will generate two LUTs for this instead of just one.
+    !SecondaryScrollDuration #= !PrimaryScrollDuration*3/4 ; You can change these independently to make different "paths" the screen will take.
 
     !TwoPhaseTransition = 0          ; Determines whether primray and secondary scrolling are handled sequentially (vanilla) or simultaneously.
                                      ;     0: Primary and seconary scrolling occur simultaneously.
@@ -75,8 +70,11 @@ math pri on
                                      ;     2: Primary scrolling first, then secondary scrolling.
     
     !PrimaryScrollCurve = 1          ; Determines how the screen accelerates/decelerates during primary scrolling.
-    !SecondaryScrollCurve = 1        ;     1: ease in ease out.
-                                     ;     2: linear, like vanilla.
+    !SecondaryScrollCurve = 1        ;     1: quadratic ease in ease out.
+                                     ;     2: ease out.
+                                     ;     3: ease in.
+                                     ;     4: bezier ease in ease out.
+                                     ;     5: linear, like vanilla.
 
     !PlaceSamusAlgorithm        = 1  ; Determines which algorithm is used to place Samus after a door transition:
                                      ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
@@ -187,7 +185,7 @@ math pri on
 {
     ; The ultimate cheat code: Making the assembler do all the work.
     macro generateLookupTableEntry(t, ScrollType)
-        if !<ScrollType>ScrollCurve == 1
+        if !<ScrollType>ScrollCurve == 4 ; bezier ease in ease out
             ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
             ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
             ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
@@ -196,7 +194,21 @@ math pri on
             ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
             db $100*((<t>/!<ScrollType>ScrollDuration)**2)*(3-2*(<t>/!<ScrollType>ScrollDuration))
         endif
-        if !<ScrollType>ScrollCurve == 2
+        if !<ScrollType>ScrollCurve == 1 ; quadratic ease in ease out. x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+            if (<t>/!<ScrollType>ScrollDuration) < 0.5
+                db $100*(2*(<t>/!<ScrollType>ScrollDuration)*(<t>/!<ScrollType>ScrollDuration))
+            endif
+            if (<t>/!<ScrollType>ScrollDuration) >= 0.5
+                db $100*(1-((0-2)*(<t>/!<ScrollType>ScrollDuration)+2)**2/2)
+            endif
+        endif
+        if !<ScrollType>ScrollCurve == 2 ; ease out. base quadratic function: 1-(1-x)*(1-x)
+            db $100*(1-(1-(<t>/!<ScrollType>ScrollDuration))*(1-(<t>/!<ScrollType>ScrollDuration)))
+        endif
+        if !<ScrollType>ScrollCurve == 3 ; ease in. base quadratic function: x*x
+            db $100*((<t>/!<ScrollType>ScrollDuration)*(<t>/!<ScrollType>ScrollDuration))
+        endif
+        if !<ScrollType>ScrollCurve == 5 ; linear
             db $100*(<t>/!<ScrollType>ScrollDuration)
         endif
     endmacro
