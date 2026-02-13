@@ -47,7 +47,7 @@ math pri on
 ;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
 ;   * Added many options:
 ;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
-;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes.
+;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes. This replaces the option TransitionAnimation - this is just a more customizable version.
 ;      > TwoPhaseTransition - can now make doors first do secondary scrolling, then primary, like vanilla.
 ;      > ScrollCurve - This controls how fast the camera accelerates/decelerates in each direction.
 ;   * The patch now tries to warn you when you make the door move fast enough to cause visual scrolling bugs.
