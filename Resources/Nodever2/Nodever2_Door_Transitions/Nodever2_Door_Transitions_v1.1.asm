@@ -7,6 +7,7 @@ math pri on
 
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
+;   This patch includes many customization options, allowing you to make them work exactly how you want.
 ;   Patch showcase video: https://youtu.be/rkpMoOeFj3Y
 
 ; by Nodever2 November 2025
@@ -42,53 +43,67 @@ math pri on
 ;      > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
-; 2026-02-?? v?.?:
-;   * Added option !PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
-;   * TODO: Added new transition animation options?
+; 2026-02-?? v1.1:
+;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
+;   * Added many options:
+;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
+;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes.
+;      > TwoPhaseTransition - can now make doors first do secondary scrolling, then primary, like vanilla.
+;      > ScrollCurve - This controls how fast the camera accelerates/decelerates in each direction.
+;   * The patch now tries to warn you when you make the door move fast enough to cause visual scrolling bugs.
+;        It's really an educated guess though. I came up with how fast it checks for based on my own testing.
+;        It will warn you in the console when assembling the patch if it thinks it is fast enough to risk bugs.
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
 ; =================================================
 {
     ; Constants - feel free to edit these
-    !Freespace80           = $80CD8E
-    !Freespace80End        = $80FFC0
-    !Freespace82           = $82F70F ; keep in mind there is space at $E310 still
-    !Freespace82End        = $82FFFF
-    !FreespaceAnywhere     = $B88000 ; Anywhere in banks $80-$BF
-    !FreespaceAnywhereEnd  = $B8FFFF
-    !RamBank               = $7F0000
-    !RamStart             #= $FB46+!RamBank
-    !ScreenFadeDelay       = #$0004  ; Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
-    !PrimaryScrollDuration = $002C   ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically). If you make it too low you'll get graphical glitches - bare minimum is close to 18h.
-                                     ;     Note: We generate a lookup table ScrollDuration entries long, so the larger the number, the more freespace used.
-    !SecondaryScrollDuration #= !PrimaryScrollDuration*3/4 ; You can change these independently to make different "paths" the screen will take.
+    !Freespace80              = $80CD8E
+    !Freespace80End           = $80FFC0
+    !Freespace82              = $82F70F ; keep in mind there is space at $E310 still
+    !Freespace82End           = $82FFFF
+    !FreespaceAnywhere        = $B88000 ; Anywhere in banks $80-$BF
+    !FreespaceAnywhereEnd     = $B8FFFF
+    !RamBank                  = $7F0000
+    !RamStart                #= $FB46+!RamBank
 
-    !TwoPhaseTransition = 0          ; Determines whether primray and secondary scrolling are handled sequentially (vanilla) or simultaneously.
-                                     ;     0: Primary and seconary scrolling occur simultaneously.
-                                     ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
-                                     ;     2: Primary scrolling first, then secondary scrolling.
+    !ScreenFadeDelay          = #$0004 ; ScreenFadeDelay: Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
+
+    !PrimaryScrollDuration    = $002C  ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically).
+                                       ;     > If you make this too low, you may get graphical glitches, and this patch will scream at you while it's assembling when it detects that this is possible.
+                                       ;         (I came up with the threshold that makes the patch scream at you on my own through testing - make this value low at your own risk).
+                                       ;         (The threshold also depends on which ScrollCurve you use).
+                                       ;     > We generate lookup tables ScrollDuration entries long, so the larger the duration(s), the more freespace used.
+                                       ;     > You can change primary/secondary scroll duration independently to make the screen take different "paths".
+    !SecondaryScrollDuration #= !PrimaryScrollDuration*2/3
+
+    !TwoPhaseTransition       = 0      ; TwoPhaseTransition: Determines whether primray and secondary scrolling occur sequentially (vanilla) or simultaneously.
+                                       ;     0: Primary and seconary scrolling occur simultaneously.
+                                       ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
+                                       ;     2: Primary scrolling first, then secondary scrolling.
+
+    !PrimaryScrollCurve       = 1      ; ScrollCurve: Determines how the screen accelerates/decelerates during primary scrolling.
+    !SecondaryScrollCurve     = 4      ;     1: quadratic ease in ease out.
+                                       ;     2: ease out.
+                                       ;     3: ease in.
+                                       ;     4: bezier ease in ease out.
+                                       ;     5: linear, like vanilla.
+
+    !PlaceSamusAlgorithm      = 1      ; PlaceSamusAlgorithm: Determines which algorithm is used to place Samus after a door transition:
+                                       ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
+                                       ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
+                                       ;     3: The door distance to spawn value is a hardcoded pixel offset from the edge of the screen.
+                                       ;     4: Advanced mode - Uses extra !FreespaceAnywhere. Different values in the door distance to spawn have different behavior:
+                                       ;        0000-8000: Vanilla behavior, i.e. algorithm 1.
+                                       ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
+                                       ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
     
-    !PrimaryScrollCurve = 1          ; Determines how the screen accelerates/decelerates during primary scrolling.
-    !SecondaryScrollCurve = 1        ;     1: quadratic ease in ease out.
-                                     ;     2: ease out.
-                                     ;     3: ease in.
-                                     ;     4: bezier ease in ease out.
-                                     ;     5: linear, like vanilla.
-
-    !PlaceSamusAlgorithm        = 1  ; Determines which algorithm is used to place Samus after a door transition:
-                                     ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
-                                     ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
-                                     ;     3: The door distance to spawn value is a hardcoded pixel offset from the edge of the screen.
-                                     ;     4: Advanced mode - Uses extra !FreespaceAnywhere. Different values in the door distance to spawn have different behavior:
-                                     ;        0000-8000: Vanilla behavior, i.e. algorithm 1.
-                                     ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
-                                     ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
-    !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
+    !ReportFreespaceAndRamUsage = 1    ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
-    !ScreenFadesOut             = 1  ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
-    !VanillaCode                = 0  ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
+    !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
+    !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
@@ -156,62 +171,78 @@ math pri on
 }
 
 ; ====================================
-; ============== NOTES  ==============
+; ============== NOTES ===============
 ; ====================================
 {
     ; roadmap/ideas:
     ; 1.0:
     ;  - Parity with vanilla door transition functionality but with better/faster animation and customizability
     ;  - Fixed dma flickering - now, if you place doors not in the middle of the screen, they won't flicker at all during the transition, because I move the DMA Y position dynamically.
-    ; 1.1 (tentative):
+    ; 1.1:
     ;  - add a way to control where samus is placed in each transition if the user wants it to work that way
     ;  - figure out a way to make the patch error out or report if the speed is too fast
+    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too. add a linear scrolling option too.
+    ;  - option to pad level data with zeroes to avoid seeing artifacts (in smaller rooms anyway) - ex moving upwards while screen not aligned out of post phantoon room shows artifacts.
+    ;  - and add an option for the door to align itself before doing main scrolling like vanilla.
+    ; 1.2 (tentative):
+    ;  - customization option to allow an option to NOT align the screen. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
     ;  - when H door is centered, flashing is intersecting escape timer... fix
     ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
     ;  - place door transition tiles as close to the edge of the screen as you want
-    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too. add a linear scrolling option too.
-    ;  - option to pad level data with zeroes to avoid seeing artifacts (in smaller rooms anyway) - ex moving upwards while screen not aligned out of post phantoon room shows artifacts.
-    ;  - fix whatever caused me to get stuck in the wall in MB's room
-    ;  - and add an option for the door to align itself before doing main scrolling like vanilla,.
-    ; 1.2 (tentative):
-    ;  - customization option to allow an option to NOT align the screen - could push this back to 1.1. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
     ; 1.x:
     ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
 }
 
 ; ====================================
-; ============== MACROS ==============
+; ========= MACROS/FUNCTIONS =========
 ; ====================================
 {
     ; The ultimate cheat code: Making the assembler do all the work.
-    macro generateLookupTableEntry(t, ScrollType)
-        if !<ScrollType>ScrollCurve == 4 ; bezier ease in ease out
-            ; Generate lookup table for bezier curve from 0 to 100, with !TransitionLength entries.
-            ;   Got the formula from here: https://stackoverflow.com/questions/13462001/ease-in-and-ease-out-animation-formula
-            ;   Which is: return (t^2)*(3-2t); // Takes in t from 0 to 1, returns a value from 0 to 1
-            ;   To make it return a value from 0 to 100h, multiply the result by 100h (100h is how many pixels the screen has to move in a door transition)
-            ;   To make it take in t from 0 to !TransitionLength, divide all instances of t by !TransitionLength
-            ;   Thus: return 100h*((t/!TransitionLength)^2)*(3-2(t/!TransitionLength))
-            db $100*((<t>/!<ScrollType>ScrollDuration)**2)*(3-2*(<t>/!<ScrollType>ScrollDuration))
+
+    function abs(num) = select(less(num, 0), num*-1, num)
+
+    ; All these functions take in and return a value from 0 to 1. The inputs and outputs are scaled when these are called.
+    function bezierEaseInEaseOut(x) = (x**2)*(3-2*x)
+    function quadraticEaseInEaseOut(x) = 2*x-(1/2)-2*(x-(1/2))*abs(x-(1/2)) ; these are easier to write than they are to read, heh... I started with x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2
+    function quadraticEaseOut(x) = (1-(1-x)*(1-x))
+    function quadraticEaseIn(x) = (x*x)
+    function linear(x) = x
+    
+    macro generateLookupTableEntry(t, ScrollType, CheckMultiplier)
+        !x = (<t>/!<ScrollType>ScrollDuration)
+        !threshold = $10
+
+        if !<ScrollType>ScrollCurve == 4
+            !func = bezierEaseInEaseOut
         endif
-        if !<ScrollType>ScrollCurve == 1 ; quadratic ease in ease out. x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
-            if (<t>/!<ScrollType>ScrollDuration) < 0.5
-                db $100*(2*(<t>/!<ScrollType>ScrollDuration)*(<t>/!<ScrollType>ScrollDuration))
+        if !<ScrollType>ScrollCurve == 1
+            !func = quadraticEaseInEaseOut
+        endif
+        if !<ScrollType>ScrollCurve == 2
+            !func = quadraticEaseOut
+        endif
+        if !<ScrollType>ScrollCurve == 3
+            !func = quadraticEaseIn
+        endif
+        if !<ScrollType>ScrollCurve == 5
+            !func = linear
+            !threshold = $09
+        endif
+
+        db $100*!func(!x)
+
+        ; Check to see if the screen will move too fast. The CheckMultiplier for secondary scrolling is a bit of a heuristic.
+        if <t> > 0
+            if abs($100*!func(<t>/!<ScrollType>ScrollDuration)-$100*!func((<t>-1)/!<ScrollType>ScrollDuration)) > !threshold*<CheckMultiplier>
+                print "WARNING! THE CAMERA IS NEARLY FAST ENOUGH DURING THE DOOR TRANSITION TO CAUSE VISUAL BUGS! USE AT YOUR OWN RISK!"
+                print "   I came up with this check on my own through experimentation, so it may not be 100% accurate. <ScrollType>"
             endif
-            if (<t>/!<ScrollType>ScrollDuration) >= 0.5
-                db $100*(1-((0-2)*(<t>/!<ScrollType>ScrollDuration)+2)**2/2)
-            endif
         endif
-        if !<ScrollType>ScrollCurve == 2 ; ease out. base quadratic function: 1-(1-x)*(1-x)
-            db $100*(1-(1-(<t>/!<ScrollType>ScrollDuration))*(1-(<t>/!<ScrollType>ScrollDuration)))
-        endif
-        if !<ScrollType>ScrollCurve == 3 ; ease in. base quadratic function: x*x
-            db $100*((<t>/!<ScrollType>ScrollDuration)*(<t>/!<ScrollType>ScrollDuration))
-        endif
-        if !<ScrollType>ScrollCurve == 5 ; linear
-            db $100*(<t>/!<ScrollType>ScrollDuration)
-        endif
+        undef "func"
+        undef "x"
+        undef "threshold"
     endmacro
+    
 }
 
 ; =======================================
@@ -416,13 +447,23 @@ if !VanillaCode == 0
         +
 
             if !TwoPhaseTransition > 0
-                LDA !RamDoorTransitionFrameCounter : CMP #$0001 : BNE +
-                ; these inital scrolls are a hack... otherwise we end up with black tiles in state 5.. blegh
-                ; TODO: figure out a better solution to this
-                ; (hint: it's going to suck. we have to fully reintroduce the old door transition function of scrolling screen to alignment.)
-                JSL ScrollCameraX : PHP
-                JSL ScrollCameraY : PHP
-                BRA ++
+                LDA !RamDoorTransitionFrameCounter : DEC : BNE +
+                
+                ; This is kind of a hack. If we don't scroll the screen in both directions at the beginning,
+                ; part of the door tube can be overwritten with black when scrolling starts.
+                ; So, scroll both directions, update the BG scrolls, then reset our position, and update BG scrolls again.
+                ; Only do it once, at the beginning of the two phase scrolling - after that, we're good...
+                ; In the long run I would like to find a better solution but this works for now.
+                JSL ScrollCameraX; : PHP
+                JSL ScrollCameraY; : PHP
+                JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
+                LDA !RamLayer1XStartPos : STA !RamLayer1XPosition
+                LDA !RamLayer1YStartPos : STA !RamLayer1YPosition
+                JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
+                INC !RamDoorTransitionFrameCounter
+                CLC : RTS
+                ;BRA ++
+
             +   ; need to do secondary direction first, then primary direction
                 LDA !RamDoorDirection : BIT #$0002
                 if !TwoPhaseTransition == 1
@@ -624,13 +665,13 @@ if !VanillaCode == 0
         ..primary
         !tCounter = 0
         while !tCounter < !PrimaryScrollDuration
-            %generateLookupTableEntry(!tCounter, Primary)
+            %generateLookupTableEntry(!tCounter, Primary, 1)
             !tCounter #= !tCounter+1
         endwhile
         ..secondary
         !tCounter = 0
         while !tCounter < !SecondaryScrollDuration
-            %generateLookupTableEntry(!tCounter, Secondary)
+            %generateLookupTableEntry(!tCounter, Secondary, 2)
             !tCounter #= !tCounter+1
         endwhile
 
