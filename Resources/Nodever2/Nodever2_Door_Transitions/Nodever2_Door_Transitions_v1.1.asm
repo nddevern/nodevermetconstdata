@@ -76,7 +76,7 @@ math pri on
                                        ;         (The threshold also depends on which ScrollCurve you use).
                                        ;     > We generate lookup tables ScrollDuration entries long, so the larger the duration(s), the more freespace used.
                                        ;     > You can change primary/secondary scroll duration independently to make the screen take different "paths".
-    !SecondaryScrollDuration #= !PrimaryScrollDuration*2/3
+    !SecondaryScrollDuration #= !PrimaryScrollDuration*1/2
 
     !TwoPhaseTransition       = 0      ; TwoPhaseTransition: Determines whether primray and secondary scrolling occur sequentially (vanilla) or simultaneously.
                                        ;     0: Primary and seconary scrolling occur simultaneously.
@@ -424,6 +424,51 @@ if !VanillaCode == 0
     !Freespace80 := InitializeLayer2Destinations_freespace
     warnpc !Freespace80End
     
+}
+
+; =======================================================
+; ==================== DECOMPRESSION ====================
+; =======================================================
+{
+    ; todo
+    ;  > test address edge cases (like if the address to compare to lines up exactly)
+    ;  > make logic to more smartly figure out which screens to pad instead of doing the entire room width - for wide rooms this creates noticeable lag
+    ;  > look into top/sides of room problems (dynamically expand room in the background? -> scrolls would make this not fun, who knows what else would be messed up too, PLMs probably would be...)
+    ;    (could patch the scrolling routine for this... idk)
+    ;  > add an option to disable this behavior
+    ;  > add option for what block gets applied in the padding
+    ;  > add options for default samus positions etc
+    ;  > test all samus algorithms and... the rest of the new settings
+
+    org $82E387 ; hijack after decompression
+        JSL PadLevelData : RTS
+
+    org !FreespaceAnywhere
+    PadLevelData: {
+        PHX : PHP : REP #$30
+        LDA $12 : PHA
+
+        LDA $07A5 ; room width in blocks
+        ASL #4    ; * 10h blocks (room height)
+        ASL       ; * 2h bytes/block
+                  ; A now holds how many bytes to fill
+        CLC : ADC $07B9 : INC #2 : STA $12 ; addr to stop filling at
+        CMP #$6401 : BPL + ; if we end out of bounds, skip padding
+
+        ; pad level data
+        LDX $07B9  ; Level data size
+        LDA #$8081 ; Block to pad level data with (sold black tile)
+    -   INX #2
+        STA $7F0000,x
+        CPX $12 : BMI -
+
+    +   PLA : STA $12
+        PLP : PLX
+        LDA #$E38E : STA !RamDoorTransitionFunctionPointer : RTL ; instructions replaced by hijack
+        .freespace
+    }
+    !FreespaceAnywhere := PadLevelData_freespace
+    warnpc !FreespaceAnywhereEnd
 }
 
 ; =======================================================
