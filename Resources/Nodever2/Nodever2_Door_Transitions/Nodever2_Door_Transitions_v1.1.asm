@@ -61,7 +61,7 @@ math pri on
     ; Constants - feel free to edit these
     !Freespace80              = $80CD8E
     !Freespace80End           = $80FFC0
-    !Freespace82              = $82F70F ; keep in mind there is space at $E310 still
+    !Freespace82              = $82F70F ; there is space at $E310 still
     !Freespace82End           = $82FFFF
     !FreespaceAnywhere        = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd     = $B8FFFF
@@ -71,8 +71,8 @@ math pri on
     !ScreenFadeDelay          = #$0004 ; ScreenFadeDelay: Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
 
     !PrimaryScrollDuration    = $002C  ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically).
-                                       ;     > If you make this too low, you may get graphical glitches, and this patch will scream at you while it's assembling when it detects that this is possible.
-                                       ;         (I came up with the threshold that makes the patch scream at you on my own through testing - make this value low at your own risk).
+                                       ;     > If you make this too low, you may get graphical glitches, and this patch will scream at you while it's assembling when it thinks that this is possible.
+                                       ;         (I came up with the threshold that makes the patch scream at you through testing on my own, may not be 100% accurate - make this value low at your own risk).
                                        ;         (The threshold also depends on which ScrollCurve you use).
                                        ;     > We generate lookup tables ScrollDuration entries long, so the larger the duration(s), the more freespace used.
                                        ;     > You can change primary/secondary scroll duration independently to make the screen take different "paths".
@@ -454,15 +454,14 @@ if !VanillaCode == 0
                 ; So, scroll both directions, update the BG scrolls, then reset our position, and update BG scrolls again.
                 ; Only do it once, at the beginning of the two phase scrolling - after that, we're good...
                 ; In the long run I would like to find a better solution but this works for now.
-                JSL ScrollCameraX; : PHP
-                JSL ScrollCameraY; : PHP
+                JSL ScrollCameraX
+                JSL ScrollCameraY
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 LDA !RamLayer1XStartPos : STA !RamLayer1XPosition
                 LDA !RamLayer1YStartPos : STA !RamLayer1YPosition
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 INC !RamDoorTransitionFrameCounter
                 CLC : RTS
-                ;BRA ++
 
             +   ; need to do secondary direction first, then primary direction
                 LDA !RamDoorDirection : BIT #$0002
