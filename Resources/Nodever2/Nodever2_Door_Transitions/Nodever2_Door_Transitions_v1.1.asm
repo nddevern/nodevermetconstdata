@@ -787,19 +787,30 @@ if !VanillaCode == 0
     ; PSR.N flag: Set based on A
     ; A: Tile address without bank byte
     SetTileDataSourceBankByte: {
+            CPX #$0000 : BNE ++ ; background
             CMP #$0000 : BMI +
-            LDA #$007F : RTS
+        ++  LDA #$007F : RTS
         +   LDA #$007E : RTS
     }
 
     ; This handles negative indexes by loading a solid black tile instead of reading out of bounds like vanilla does.
     CheckAndGetBlockToUpdate: {
-            TYA : CLC : ADC $36 : BMI +
-            CMP #$0002 : BMI + ; todo: this will not work for custom layer 2 BGs. Also it'd be cool to check for index out of bounds in the positive direction here too, then we wouldnt have to pad level data?
-            LDA [$36],y : BRA ++
-        +   LDA !BlackTile
-        ++  STA $093B
-            RTS
+            PHX ; If you add/remove stack use, update the relative stack addressing below.
+            TYA : CLC : ADC $36 : TAX
+            LDA $05,s : BNE .background ; For BG, this will be 1C. For FG, this will be 0. Saved at $80AC4D.
+            TXA : BMI .blackTile ; if attempting to load from negative address in FG - black tile
+        .foreground
+            CPX #$0002 : BMI .blackTile ; if attempting to load from before the start of foreground data - black tile
+            BRA .loadTile
+        .background
+            CPX #$9602 : BMI .blackTile ; if attempting to load from before the start of background data - black tile
+        .loadTile
+            LDA [$36],y : BRA .finish
+        .blackTile
+            LDA !BlackTile        
+        .finish
+            STA $093B
+            PLX : RTS
         .freespace
     }
     !Freespace80 := CheckAndGetBlockToUpdate_freespace
