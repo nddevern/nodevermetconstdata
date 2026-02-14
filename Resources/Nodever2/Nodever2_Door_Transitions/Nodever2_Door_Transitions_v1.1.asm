@@ -101,6 +101,8 @@ math pri on
     
     !ReportFreespaceAndRamUsage = 1    ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
+    !BlackTile = #$8081 ; This is the level data for 1 solid black tile in vanilla. The patch writes this in a few places where you can see OOB.
+
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
     !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
@@ -130,6 +132,18 @@ math pri on
     !RamBG2XOffset                    = $0921
     !RamBG2YScroll                    = $B7
     !RamBG2YOffset                    = $0923
+    !RamBG1XBlock                     = $0907
+    !RamBG1YBlock                     = $0909
+    !RamBG2XBlock                     = $090B
+    !RamBG2YBlock                     = $090D
+    !RamLayer1XBlock                  = $08F7
+    !RamLayer1YBlock                  = $08F9
+    !RamLayer2XBlock                  = $08FB
+    !RamLayer2YBlock                  = $08FD
+    !RamBlocksToUpdateXBlock          = $0990
+    !RamBlocksToUpdateYBlock          = $0992
+    !RamVramBlocksToUpdateXBlock      = $0994
+    !RamVramBlocksToUpdateYBlock      = $0996
     !RamSamusXPosition                = $0AF6
     !RamSamusYPosition                = $0AFA
     !RamSamusYRadius                  = $0B00
@@ -457,7 +471,7 @@ if !VanillaCode == 0
 
         ; pad level data
         LDX $07B9  ; Level data size
-        LDA #$8081 ; Block to pad level data with (sold black tile)
+        LDA !BlackTile ; Block to pad level data with (sold black tile)
     -   INX #2
         STA $7F0000,x
         CPX $12 : BMI -
@@ -729,8 +743,11 @@ if !VanillaCode == 0
 ; ============== SUPER METROID SCROLLING ROUTINE ==============
 ; =============================================================
 {
-    ; Need to patch $80A3DF to handle horizontal scrolling when the screen is at a negative Y pos.
+    ; Need to patch $80A3DF/$80AB78
     ; (this took a ton of digging to figure out that this was the problem and solution... heh...)
+    
+    ; ===== FIX WHEN VERTICALLY OOB =====
+    ; handle horizontal scrolling when the screen is at a negative Y pos.
 
     ; layer 1
     org $80A407
@@ -757,6 +774,37 @@ if !VanillaCode == 0
         .freespace
     }
     warnpc $80AF89
+
+    ; ===== FIX WHEN HORIZONTALLY OOB =====
+    ; handle vertical scrolling when the screen is at a negative X pos.
+
+    org $80ABA5 : JSR SetTileDataSourceBankByte
+    org $80AC57 : JSR CheckAndGetBlockToUpdate : NOP #2
+
+    org !Freespace80
+    ; A: Layer 1/2 Y block
+    ; Y: BG1/2 Y block
+    ; PSR.N flag: Set based on A
+    ; A: Tile address without bank byte
+    SetTileDataSourceBankByte: {
+            CMP #$0000 : BMI +
+            LDA #$007F : RTS
+        +   LDA #$007E : RTS
+    }
+
+    ; This handles negative indexes by loading a solid black tile instead of reading out of bounds like vanilla does.
+    CheckAndGetBlockToUpdate: {
+            TYA : CLC : ADC $36 : BMI +
+            CMP #$0002 : BMI + ; todo: this will not work for custom layer 2 BGs. Also it'd be cool to check for index out of bounds in the positive direction here too, then we wouldnt have to pad level data?
+            LDA [$36],y : BRA ++
+        +   LDA !BlackTile
+        ++  STA $093B
+            RTS
+        .freespace
+    }
+    !Freespace80 := CheckAndGetBlockToUpdate_freespace
+    warnpc !Freespace80End
+
 }
 
 ; ======================================================================
