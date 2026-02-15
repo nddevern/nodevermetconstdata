@@ -217,6 +217,7 @@ math pri on
     ;  - when H door is centered, flashing is intersecting escape timer... fix
     ;  - place doors anywhere on screen a-la "door glitch fix" https://metroidconstruction.com/resource.php?id=44
     ;  - place door transition tiles as close to the edge of the screen as you want
+    ;  - make the SM scrolling code updates only apply if two phase scrolling is disabled (this would require moving secondary scrolling back to before the new room gets loaded as in vanilla - a big change)
     ; 1.x:
     ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
 }
@@ -761,13 +762,13 @@ if !VanillaCode == 0
     warnpc !Freespace80End
 
     org $80AA0B : JSR SetTileDataSourceBankByte
-    org $80AAA4 : JSR CheckAndGetBlockToUpdate : NOP #2
+    org $80AAA4 : LDX #$0000 : JSR SetBlockToUpdate : NOP #2
 
     ; ===== FIX WHEN HORIZONTALLY OOB =====
     ; handle vertical scrolling when the screen is at a negative X pos.
 
     org $80ABA5 : JSR SetTileDataSourceBankByte
-    org $80AC57 : JSR CheckAndGetBlockToUpdate : NOP #2
+    org $80AC57 : LDX #$0001 : JSR SetBlockToUpdate : NOP #2
 
     org !Freespace80
     ; A: Layer 1/2 Y block
@@ -781,30 +782,95 @@ if !VanillaCode == 0
         +   LDA #$007E : RTS
     }
 
-    ; This handles negative indexes by loading a solid black tile instead of reading out of bounds like vanilla does.
-    CheckAndGetBlockToUpdate: {
-            PHX ; If you add/remove stack use, update the relative stack addressing below.
-            TYA : CLC : ADC $36 : TAX
-            LDA $05,s : BNE .background ; For BG, this will be 1C. For FG, this will be 0. Saved at $80AC4D.
+    ; Parameters:
+    ;   X: 1C for BG, 0 for FG.
+    ;   Y: Offset into $7F to load from.
+    ; Returns:
+    ;   A: Offset into level data array or BG data array.
+    ;   PSR.N: Set based on A.
+    GetPotentialBlockOffset: {
+            REP #$20
+            TYA : CLC : ADC $36
+            INX : DEX : BNE .background
         .foreground
-            TXA : DEC #2                ; A = offset into layer 1 level data
-            BRA .check
+            DEC #2                ; A = offset into layer 1 level data
+            RTS
         .background
-            TXA : SEC : SBC #$9602      ; A = offset into layer 2 BG data
-        .check
+            SEC : SBC #$9602      ; A = offset into layer 2 BG data
+            RTS
+    }
+
+    ; This handles negative indexes by loading a solid black tile instead of reading out of bounds like vanilla does.
+    ; Parameters:
+    ;   $01,s (before JSR) -> $05,s (after JSR and PHX): 1C for BG, 0 for FG.
+    ;   $03,s (before JSR) -> $07,s (after JSR and PHX): Offset of first block of next row
+    ;   $05,s (before JSR) -> $09,s (after JSR and PHX): Offset of first block of current row
+    ;   X: 0 for vertical scrolling. For horizontal: if 1, 
+    ;   Y: Offset into [$36] to load from.
+    ; Returns:
+    ;   A: Block to update.
+    SetBlockToUpdate: {
+            PHX ; If you change stack use, update the stack relative addressing below
+            LDA $05,s : TAX : JSR GetPotentialBlockOffset
             BMI .blackTile              ; if attempting to load from before the start of data - black tile
             CMP $07B9 : BPL .blackTile  ; if attempting to load from after the end of data - black tile
-            ; todo: we could calculate a threshold position, where if we exceed it, we are 
+            TAX : LDA $01,s : BEQ .horizontalScrolling
+        .verticalScrolling
+            TXA : CMP $07,s : BPL .blackTile ; If current block is on the Y level after the one we started at, load black tile.
+            CMP $09,s : BMI .blackTile       ; If current block is on a different Y level than we started at, load black tile.
+            BRA .loadTile
+        .horizontalScrolling
         .loadTile
             LDA [$36],y : BRA .finish
         .blackTile
             LDA !BlackTile        
         .finish
-            STA $093B
-            PLX : RTS
+            PLX
+            STA $093B : AND #$03FF ; instructions replaced by hijack
+            RTS
         .freespace
     }
-    !Freespace80 := CheckAndGetBlockToUpdate_freespace
+    !Freespace80 := SetBlockToUpdate_freespace
+    warnpc !Freespace80End
+
+
+
+    ; ===== FIX ROOM WRAPPING =====
+    org $80AC4D : JSR GetPotentialBlockOffset : JMP GetOffsetOfNextRow : GetOffsetOfNextRowReturn: : LDY #$0000 : PHX ; Store offset of first block of next row in stack
+    org $80AD16 : JMP ReturnFromUpdateLevelBGData ; Fix stack
+
+
+    org !Freespace80
+    ReturnFromUpdateLevelBGData: {
+        PLX
+        INC $0970,x
+        PLA : PLA ; new additions
+        PLB : PLP : RTS
+    }
+
+    ; Parameters:
+    ;   A: Potential block offset into level data or BG data
+    ; Returns:
+    ;   $01,s: Offset of the first block in the next row of blocks after the current one. i.e. if the current block is in row 3, Y will have the offset of the first block in row 4.
+    ;   $03,s: Offset of the first block in the current row of blocks after the current one. i.e. if the current block is in row 3, Y will have the offset of the first block in row 4.
+    GetOffsetOfNextRow: {
+        LSR ; for now, do our calculations in blocks, not offsets
+        PHA
+        STA $004204
+        SEP #$20
+        LDA $07A5 : STA $004206
+        REP #$20 : PLA : PHA : PLA ; wait for division
+        SEC : SBC $004216
+        ASL : PHA : LSR ; top of stack now contains index of first block of current row
+        CLC : ADC $07A5
+        ASL
+        PHA ; top of stack now contains the index of the first block of next row        
+
+        LDA #$0011 : STA $0939 ; Instructions replaced by hijack
+        JMP GetOffsetOfNextRowReturn
+        .freespace
+    }
+    !Freespace80 := GetOffsetOfNextRow_freespace
     warnpc !Freespace80End
 }
 
