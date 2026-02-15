@@ -44,7 +44,6 @@ math pri on
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 ; 2026-02-?? v1.1:
-;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
 ;   * Added many options:
 ;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
 ;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes. This replaces the option TransitionAnimation - this is just a more customizable version.
@@ -53,6 +52,21 @@ math pri on
 ;   * The patch now tries to warn you when you make the door move fast enough to cause visual scrolling bugs.
 ;        It's really an educated guess though. I came up with how fast it checks for based on my own testing.
 ;        It will warn you in the console when assembling the patch if it thinks it is fast enough to risk bugs.
+;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
+;   * Fixed scrolling bugs for BG1, BG2 that would occur when the screen is scrolling while OOB in the negative X direction.
+;   * Updated SM's scrolling code to not render OOB tiles. Collision is unaffected.
+;   todo: reach out to ocesse,
+;         look into amoeba scrolling sky ram conflict,
+;         test test test
+;          > test bg2 position calculation when bg2 x/y scroll is not 0% or 100% and bg1 x/y is negative
+;         especially pixel offset samus placement mode
+;-    ;  > test address edge cases (like if the address to compare to lines up exactly)
+;-    ;  > make logic to more smartly figure out which screens to pad instead of doing the entire room width - for wide rooms this creates noticeable lag
+;-    ;  > look into top/sides of room problems (dynamically expand room in the background? -> scrolls would make this not fun, who knows what else would be messed up too, PLMs probably would be...)
+;-    ;    (could patch the scrolling routine for this... idk)
+;-    ;  > add an option to disable this behavior
+    ;  > add options for default samus positions etc
+    ;  > test all samus algorithms and... the rest of the new settings
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -441,51 +455,6 @@ if !VanillaCode == 0
 }
 
 ; =======================================================
-; ==================== DECOMPRESSION ====================
-; =======================================================
-{
-    ; todo
-    ;  > test address edge cases (like if the address to compare to lines up exactly)
-    ;  > make logic to more smartly figure out which screens to pad instead of doing the entire room width - for wide rooms this creates noticeable lag
-    ;  > look into top/sides of room problems (dynamically expand room in the background? -> scrolls would make this not fun, who knows what else would be messed up too, PLMs probably would be...)
-    ;    (could patch the scrolling routine for this... idk)
-    ;  > add an option to disable this behavior
-    ;  > add option for what block gets applied in the padding
-    ;  > add options for default samus positions etc
-    ;  > test all samus algorithms and... the rest of the new settings
-
-    org $82E387 ; hijack after decompression
-        JSL PadLevelData : RTS
-
-    org !FreespaceAnywhere
-    PadLevelData: {
-        PHX : PHP : REP #$30
-        LDA $12 : PHA
-
-        LDA $07A5 ; room width in blocks
-        ASL #4    ; * 10h blocks (room height)
-        ASL       ; * 2h bytes/block
-                  ; A now holds how many bytes to fill
-        CLC : ADC $07B9 : INC #2 : STA $12 ; addr to stop filling at
-        CMP #$6401 : BPL + ; if we end out of bounds, skip padding
-
-        ; pad level data
-        LDX $07B9  ; Level data size
-        LDA !BlackTile ; Block to pad level data with (sold black tile)
-    -   INX #2
-        STA $7F0000,x
-        CPX $12 : BMI -
-
-    +   PLA : STA $12
-        PLP : PLX
-        LDA #$E38E : STA !RamDoorTransitionFunctionPointer : RTL ; instructions replaced by hijack
-        .freespace
-    }
-    !FreespaceAnywhere := PadLevelData_freespace
-    warnpc !FreespaceAnywhereEnd
-}
-
-; =======================================================
 ; ============== DOOR TRANSITION SCROLLING ==============
 ; =======================================================
 {
@@ -745,35 +714,54 @@ if !VanillaCode == 0
 {
     ; Need to patch $80A3DF/$80AB78
     ; (this took a ton of digging to figure out that this was the problem and solution... heh...)
-    
-    ; ===== FIX WHEN VERTICALLY OOB =====
-    ; handle horizontal scrolling when the screen is at a negative Y pos.
 
-    ; layer 1
-    org $80A407
-        LDY $0909 : LDA $08F9 : JSR SetLayerYBlockHandleNegative
-        JSR $A9DB : BRA +
-    warnpc $80A416
-    org $80A416 : +
-    
-    ; layer 2
-    org $80A43F
-        LDY $090D : LDA $08FD : JSR SetLayerYBlockHandleNegative
-        JSR $A9D6 : BRA +
-    warnpc $80A44E
-    org $80A44E : +
-    
-    org DoorTransitionScrollingHorizontalSetup_freespace ; newly free space
-    ; A: Layer 1/2 Y block
-    ; Y: BG1/2 Y block
-    ; PSR.N flag: Set based on A
-    SetLayerYBlockHandleNegative: {
-            BPL +
-            LDA #$0000 : STA $0992 : STA $0996 : RTS
-        +   STA $0992 : TYA : STA $0996 : RTS
+    ; ===== FIX WHEN VERTICALLY OOB =====
+
+    org $80A9E7
+    JMP GetAddressOfBlocksToUpdateHandleNegative
+
+    org !Freespace80
+    GetAddressOfBlocksToUpdateHandleNegative: {
+        ; $36 = address of blocks to update (in bank $7F)
+        ; Y: negative flag
+        ; A is in 8 bit mode here
+
+        LDY #$0000
+        LDA !RamRoomWidthInBlocks
+        STA $4202 ; multiplicand
+        LDA !RamBlocksToUpdateYBlock
+
+        ; new code: set negative flag
+        BPL +
+        INY
+        EOR #$FF : INC
+
+    +   STA $4203 ; multiplicand
+        PHB
+        REP #$30
+        
+        NOP #4 ; wasting more time than I need probably, I don't feel like counting cycles
+
+        LDA $4216 ; multiplication result
+
+        ; new code: check negative flag
+        DEY : BNE +
+        EOR #$FFFF : INC
+
+    +   CLC : ADC !RamBlocksToUpdateXBlock
+        ASL
+        CLC : ADC #$0002
+        TXY : BEQ + : CLC : ADC #$9600 ; If background: add 9600
+    +   STA $36
+
+        JMP $AA0B ; return
         .freespace
     }
-    warnpc $80AF89
+    !Freespace80 := GetAddressOfBlocksToUpdateHandleNegative_freespace
+    warnpc !Freespace80End
+
+    org $80AA0B : JSR SetTileDataSourceBankByte
+    org $80AAA4 : JSR CheckAndGetBlockToUpdate : NOP #2
 
     ; ===== FIX WHEN HORIZONTALLY OOB =====
     ; handle vertical scrolling when the screen is at a negative X pos.
@@ -798,12 +786,15 @@ if !VanillaCode == 0
             PHX ; If you add/remove stack use, update the relative stack addressing below.
             TYA : CLC : ADC $36 : TAX
             LDA $05,s : BNE .background ; For BG, this will be 1C. For FG, this will be 0. Saved at $80AC4D.
-            TXA : BMI .blackTile ; if attempting to load from negative address in FG - black tile
         .foreground
-            CPX #$0002 : BMI .blackTile ; if attempting to load from before the start of foreground data - black tile
-            BRA .loadTile
+            TXA : DEC #2                ; A = offset into layer 1 level data
+            BRA .check
         .background
-            CPX #$9602 : BMI .blackTile ; if attempting to load from before the start of background data - black tile
+            TXA : SEC : SBC #$9602      ; A = offset into layer 2 BG data
+        .check
+            BMI .blackTile              ; if attempting to load from before the start of data - black tile
+            CMP $07B9 : BPL .blackTile  ; if attempting to load from after the end of data - black tile
+            ; todo: we could calculate a threshold position, where if we exceed it, we are 
         .loadTile
             LDA [$36],y : BRA .finish
         .blackTile
@@ -815,7 +806,54 @@ if !VanillaCode == 0
     }
     !Freespace80 := CheckAndGetBlockToUpdate_freespace
     warnpc !Freespace80End
+}
 
+; =============================================================
+; ================ PATCH CODE TO CALC BG2 X/Y =================
+; =============================================================
+{
+    ; This code was not handling negative L1 input position correctly
+    ;  when BG2 X/Y scroll values are not 0% or 100%.
+    
+    ; We will use X as a negative flag, negate values before and after the calculation if needed.
+
+    ; X scroll
+    org $80A30A : PHX : JSR SetNegativeFlag : TYA : NOP
+    org $80A31E : JSR GetHighByteOfY
+    org $80A329 : JSR CheckNegativeFlag : PLX : TAY
+
+    ; Y scroll
+    org $80A34B : PHX : JSR SetNegativeFlag : TYA : NOP
+    org $80A35F : JSR GetHighByteOfY
+    org $80A36A : JSR CheckNegativeFlag : PLX : TAY
+
+    org !Freespace80
+    SetNegativeFlag: {
+            PHP
+            LDX #$0000
+            CPY #$0000 : BPL .positive
+            INX
+            REP #$30
+            PHA : TYA : EOR #$FFFF : INC : TAY : PLA
+        .positive
+            PLP : STA $4202 ; Instructions replaced by hijack
+            RTS
+    }
+
+    GetHighByteOfY: {
+        PHP : REP #$30 : TYA : XBA : PLP : RTS
+    }
+
+    CheckNegativeFlag: {
+            CLC : ADC $4216 ; Instructions replaced by hijack
+            DEX : BNE .positive
+            EOR #$FFFF : INC
+        .positive
+            RTS
+        .freespace
+    }
+    !Freespace80 := CheckNegativeFlag_freespace
+    warnpc !Freespace80End
 }
 
 ; ======================================================================
