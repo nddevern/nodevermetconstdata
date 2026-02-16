@@ -805,7 +805,7 @@ if !VanillaCode == 0
     ;   $01,s (before JSR) -> $05,s (after JSR and PHX): 1C for BG, 0 for FG.
     ;   $03,s (before JSR) -> $07,s (after JSR and PHX): Offset of first block of next row
     ;   $05,s (before JSR) -> $09,s (after JSR and PHX): Offset of first block of current row
-    ;   X: 0 for vertical scrolling. For horizontal: if 1, 
+    ;   X: 0 for vertical scrolling. 1+ for horizontal scrolling.
     ;   Y: Offset into [$36] to load from.
     ; Returns:
     ;   A: Block to update.
@@ -834,11 +834,11 @@ if !VanillaCode == 0
     warnpc !Freespace80End
 
 
-
     ; ===== FIX ROOM WRAPPING =====
-    org $80AC4D : JSR GetPotentialBlockOffset : JMP GetOffsetOfNextRow : GetOffsetOfNextRowReturn: : LDY #$0000 : PHX ; Store offset of first block of next row in stack
-    org $80AD16 : JMP ReturnFromUpdateLevelBGData ; Fix stack
 
+    ; vertical scrolling
+    org $80AC4D : LDA $0992 : JMP GetOffsetOfNextRow : GetOffsetOfNextRowReturn: : LDY #$0000 : PHX ; Store offset of first block of next row in stack
+    org $80AD16 : JMP ReturnFromUpdateLevelBGData ; Fix stack
 
     org !Freespace80
     ReturnFromUpdateLevelBGData: {
@@ -849,18 +849,19 @@ if !VanillaCode == 0
     }
 
     ; Parameters:
-    ;   A: Potential block offset into level data or BG data
+    ;   A: Blocks to update Y block
     ; Returns:
     ;   $01,s: Offset of the first block in the next row of blocks after the current one. i.e. if the current block is in row 3, Y will have the offset of the first block in row 4.
     ;   $03,s: Offset of the first block in the current row of blocks after the current one. i.e. if the current block is in row 3, Y will have the offset of the first block in row 4.
     GetOffsetOfNextRow: {
-        LSR ; for now, do our calculations in blocks, not offsets
+        ; for now, do our calculations in blocks, not offsets
         PHA
-        STA $004204
         SEP #$20
-        LDA $07A5 : STA $004206
-        REP #$20 : PLA : PHA : PLA ; wait for division
-        SEC : SBC $004216
+        STA $004202
+        LDA $07A5 : STA $004203
+        NOP #4
+        REP #$20 : PLA ; wait for multiplication
+        LDA $004216
         ASL : PHA : LSR ; top of stack now contains index of first block of current row
         CLC : ADC $07A5
         ASL
