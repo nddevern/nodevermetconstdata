@@ -67,6 +67,14 @@ math pri on
 ;-    ;  > add an option to disable this behavior
     ;  > add options for default samus positions etc
     ;  > test all samus algorithms and... the rest of the new settings
+    ;  > TODO: EightBitMultiplication truncates scroll distances > 255 pixels.
+    ;         The lookup table value is 8-bit (0-255) and the distance can be 16-bit,
+    ;         but the current 8x8 software multiply discards the high byte of distance.
+    ;         This means rooms requiring > 255px of scrolling in one axis will have
+    ;         incorrect easing (the offset will wrap). Fix by extending to a 16x8 multiply:
+    ;         split distance into high/low bytes, multiply each by the table value separately,
+    ;         then combine: result = (dist_hi * table_val) << 8 + (dist_lo * table_val).
+    ;         Cannot use hardware multiply registers ($4202/$4203) because this runs in IRQ context.
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -179,6 +187,10 @@ math pri on
     ;    3: Up
     ;    +4: Close a door on next screen
     ;}
+
+    ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
+    !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
+    org !UpDoorYDestinationOffset : dw $0020
 
     ; new variables - can repoint the ram that these use
     !CurRamAddr                                  := !RamStart
@@ -398,7 +410,7 @@ if !VanillaCode == 0
             LDA !RamLayer1XDestination : STA !RamLayer1XPosition ; This is what vanilla does - we will later offset this after returning
 
             LDA !RamLayer1YPosition : AND #$00FF : CLC : ADC !RamLayer1YDestination : PHA
-            LDA !RamLayer1YPosition-1 : BIT #$FF00 : BPL +
+            LDA !RamLayer1YPosition-1 : BPL +
             LDA $01,s : SEC : SBC #$0100 : STA $01,s
         +   PLA : STA !RamLayer1YPosition
             JSR $A2F9 ; Instruction replaced by hijack
@@ -412,7 +424,7 @@ if !VanillaCode == 0
             LDA !RamLayer1YDestination : STA !RamLayer1YPosition ; This is what vanilla does - we will later offset this after returning
 
             LDA !RamLayer1XPosition : AND #$00FF : CLC : ADC !RamLayer1XDestination : PHA
-            LDA !RamLayer1XPosition-1 : BIT #$FF00 : BPL +
+            LDA !RamLayer1XPosition-1 : BPL +
             LDA $01,s : SEC : SBC #$0100 : STA $01,s
         +   PLA : STA !RamLayer1XPosition
             JSR $A2F9 ; Instruction replaced by hijack
@@ -441,7 +453,7 @@ if !VanillaCode == 0
             LDA !RamLayer1XDestination : STA !RamLayer1XPosition
             LDA !RamLayer1YDestination : STA !RamLayer1YPosition
             LDA !RamDoorDirection : AND #$0003 : CMP #$0003 : BNE +
-            LDA $80ADEF+1 : CLC : ADC !RamLayer1YPosition : STA !RamLayer1YPosition ; I hate vertical doors
+            LDA !UpDoorYDestinationOffset : CLC : ADC !RamLayer1YPosition : STA !RamLayer1YPosition ; I hate vertical doors
         +   JSR CalculateLayer2Position
             LDA !RamLayer2XPosition : STA !RamLayer2XDestination
             LDA !RamLayer2YPosition : STA !RamLayer2YDestination
@@ -485,9 +497,11 @@ if !VanillaCode == 0
                 ; In the long run I would like to find a better solution but this works for now.
                 JSL ScrollCameraX
                 JSL ScrollCameraY
+                JSR CalculateLayer2Position
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 LDA !RamLayer1XStartPos : STA !RamLayer1XPosition
                 LDA !RamLayer1YStartPos : STA !RamLayer1YPosition
+                JSR CalculateLayer2Position
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 INC !RamDoorTransitionFrameCounter
                 CLC : RTS
@@ -514,10 +528,12 @@ if !VanillaCode == 0
                 JSL ScrollCameraY : PHP
             endif
 
+            JSR CalculateLayer2Position
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
             INC !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
+            JSR CalculateLayer2Position
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; why does vanilla call this twice? didn't really observe any effects from commenting this out (yet)
             SEC : RTS
         +   PLP : ++ : CLC : RTS
@@ -627,7 +643,7 @@ if !VanillaCode == 0
         ; Assumes REP#$30 before calling
         ; Parameters listed below:
 
-        !tBaseStackOffset #= 1+2+1+2+2+2+1 ; stack is always 1, +2 for return addr, +1 for php, +2 for phx, +2 for pha, +2 for phy, +1 for phb
+        !tBaseStackOffset #= 1+2+1+2+2+2+1 ; +1 for stack base, +2 for return addr, +1 for php, +2 for phx, +2 for phy, +2 for pha, +1 for phb
         !tStackOffset := !tBaseStackOffset
         !tLayer1StartPos                          = !tStackOffset+0,s
         !tLayer1Position                          = !tStackOffset+2,s
@@ -653,7 +669,7 @@ if !VanillaCode == 0
         ++  CMP !tCameraTableIndex : BEQ .finish : BPL .continue
         .finish
             LDA !tLayer1Destination : STA !tLayer1Position
-            LDA !tLayer2Destination : STA !tLayer2Position
+            ; Layer 2 position is calculated from layer 1 by CalculateLayer2Position in MainScrollingRoutine
             PLB : PLA : PLY : PLX : PLP : SEC : RTS ; done
         .continue
             PHK : PLB ; DB = current bank
@@ -678,11 +694,10 @@ if !VanillaCode == 0
         +   
             LDA !tInvertDirectionFlag : BNE .invert
             LDA !tLayer1StartPos : CLC : ADC $01,s : STA !tLayer1Position
-            LDA !tLayer2StartPos : CLC : ADC $01,s : STA !tLayer2Position
             BRA +
         .invert
             LDA !tLayer1StartPos : SEC : SBC $01,s : STA !tLayer1Position
-            LDA !tLayer2StartPos : SEC : SBC $01,s : STA !tLayer2Position
+            ; Layer 2 position is calculated from layer 1 by CalculateLayer2Position in MainScrollingRoutine
         +   PLA : !tStackOffset := !tBaseStackOffset
 
             LDA !tCameraTableIndex : INC : STA !tCameraTableIndex
@@ -978,8 +993,8 @@ if !VanillaCode == 0
         ...verticalTransition
             LDA !RamLayer1YDestination : STA !RamSamusYPosition
         ...continue
-            LDX !RamDoorDirection : AND #$0003
-            LDA .defaults_mine : JSR .moveSamus
+            LDA !RamDoorDirection : AND #$0003 : ASL : TAX
+            LDA .defaults_mine,x : JSR .moveSamus
             JMP .finish
 
         ..doorcap
