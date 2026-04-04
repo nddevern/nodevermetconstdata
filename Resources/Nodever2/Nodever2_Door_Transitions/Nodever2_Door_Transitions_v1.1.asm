@@ -205,14 +205,13 @@ math pri on
     ; 1.x:
     ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
     ;  - todo: reach out to ocesse,
-    ;  - TODO: EightBitMultiplication truncates scroll distances > 255 pixels.
-    ;         The lookup table value is 8-bit (0-255) and the distance can be 16-bit,
-    ;         but the current 8x8 software multiply discards the high byte of distance.
-    ;         This means rooms requiring > 255px of scrolling in one axis will have
-    ;         incorrect easing (the offset will wrap). Fix by extending to a 16x8 multiply:
+    ;  - NOTE: The easing multiply only handles 8-bit distances (0-255 pixels).
+    ;         Primary scrolling uses fixed screen offsets ($0100 horizontal, $00E0 vertical),
+    ;         and the $0100 case is handled by a fast-path that skips the multiply entirely.
+    ;         Secondary scrolling (alignment) is always <= 1 screen, so distance fits in 8 bits.
+    ;         If a future feature needs distances > 255, extend to 16x8 multiply:
     ;         split distance into high/low bytes, multiply each by the table value separately,
     ;         then combine: result = (dist_hi * table_val) << 8 + (dist_lo * table_val).
-    ;         Cannot use hardware multiply registers ($4202/$4203) because this runs in IRQ context.
 }
 
 ; ====================================
@@ -541,9 +540,8 @@ if !VanillaCode == 0
             INC !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
-            JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; why does vanilla call this twice? didn't really observe any effects from commenting this out (yet)
-            SEC : RTS
-        +   PLP : ++ : CLC : RTS
+            SEC : RTS ; Done with both horizontal and vertical scrolling, return carry set
+        +   PLP : ++ : CLC : RTS ; Not done, return carry clear
     }
 
     CalculateLayer2Position: {
@@ -603,47 +601,6 @@ if !VanillaCode == 0
             RTL
     }
 
-    EightBitMultiplication: ; stolen from https://www.nesdev.org/wiki/8-bit_Multiply and hacked into inefficiency by yours truly
-    ;;
-    ; Multiplies two 8-bit factors to produce a 16-bit product
-    ; @param A one factor
-    ; @param Y another factor
-    ; @return 16 bit result in A
-    ; Y gets clobbered
-    !prodlo  = $26
-    !factor2 = $27
-        PHP
-        REP #$30
-        PHA
-        LDA !prodlo : PHA : LDA $03,s
-        SEP #$30
-        ; Factor 1 is stored in the lower bits of prodlo; the low byte of
-        ; the product is stored in the upper bits.
-        LSR  ; prime the carry bit for the loop
-        STA !prodlo
-        STY !factor2
-        LDA #0
-        LDY #8
-    .loop:
-        ; At the start of the loop, one bit of prodlo has already been
-        ; shifted out into the carry.
-        BCC .noadd
-        CLC
-        ADC !factor2
-    .noadd:
-        ROR
-        ROR !prodlo  ; pull another bit out for the next iteration
-        DEY         ; inc/dec don't modify carry; only shifts and adds do
-        BNE .loop
-        STA !factor2
-        REP #$30
-        LDA !prodlo
-        PLY : STY !prodlo
-        PLY
-        PLP
-        RTS
-    .endproc
-
     ScrollCamera: {
         ; Scrolls the screen. This function is expected to be called every frame until this function returns carry set
         ; Assumes REP#$30 before calling
@@ -694,8 +651,16 @@ if !VanillaCode == 0
             ; convert to a %
             ; the offset we need in the end (respecting order of operations):
             ;     layer 1 x pos = layer 1 x start pos + $01,s * (distance between start and end of transition) / 100h
-            LDA $01,s : JSR EightBitMultiplication
-            LSR #8
+            ; 8x8 hardware multiply: (table_value * distance) >> 8
+            ; A = distance (from TYA above), $01,s = table_value
+            SEP #$20
+            STA $4202          ; distance (low byte) -> multiplicand
+            LDA $01,s          ; table_value
+            STA $4203          ; triggers multiply
+            REP #$20           ; 3 cycles \
+            NOP #3             ; 6 cycles ) 9 cycle wait for hardware result
+            LDA $4217          ; A_lo = multiply result high byte, A_hi = joypad garbage
+            AND #$00FF         ; mask to just the result
             STA $01,s
         +   
             LDA !tInvertDirectionFlag : BNE .invert
