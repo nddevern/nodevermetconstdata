@@ -740,29 +740,30 @@ if !VanillaCode == 0
 
     ; ===== FIX WHEN VERTICALLY OOB =====
 
-    org $80A9E7
+    org $80A9E5
     JMP GetAddressOfBlocksToUpdateHandleNegative
 
     org !Freespace80
     GetAddressOfBlocksToUpdateHandleNegative: {
         ; $36 = address of blocks to update (in bank $7F)
         ; Y: negative flag
-        ; A is in 8 bit mode here
+        ; A is in 16 bit mode here (callers use REP #$20; PHP at $A9E4 saved it)
 
         LDY #$0000
-        LDA !RamRoomWidthInBlocks
-        STA $4202 ; multiplicand
         LDA !RamBlocksToUpdateYBlock
 
         ; new code: set negative flag
         BPL +
         INY
-        EOR #$FF : INC
+        EOR #$FFFF : INC
 
-    +   STA $4203 ; multiplicand
+    +   SEP #$20 ; 8-bit A for hardware multiply
+        STA $4202 ; multiplicand A (Y block, positive)
+        LDA !RamRoomWidthInBlocks
+        STA $4203 ; multiplicand B (room width) - multiplication starts on this write
         PHB
         REP #$30
-        
+
         NOP #4 ; wasting more time than I need probably, I don't feel like counting cycles
 
         LDA $4216 ; multiplication result
