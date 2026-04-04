@@ -447,6 +447,36 @@ if !VanillaCode == 0
     warnpc $80B032
 
     org !Freespace80
+    ; --- Layer 2 scrolling during door transitions ---
+    ;
+    ; How Layer2Destination is calculated (this function):
+    ;   L1 position is temporarily set to L1 destination, then CalculateLayer2Position ($A2F9/$A33A)
+    ;   computes L2 from L1 using the room's parallax ratio. The result is saved as L2 destination.
+    ;   For upward doors, L1Y is additionally offset by !UpDoorYDestinationOffset ($0020) before the
+    ;   calculation, matching the vanilla up-door Y adjustment at $80:ADCF.
+    ;
+    ; How Layer2StartPos is calculated:
+    ;   The vanilla direction-specific setup routines ($AD4A/$AD74/$AD9E/$ADC8) compute L2 at the
+    ;   destination via CalculateLayer2Position, then apply a flat screen offset to BOTH L1 and L2:
+    ;     Right ($AD4A): L2X = parallax(L1X_dest) - $0100, then L1X -= $0100
+    ;     Left  ($AD74): L2X = parallax(L1X_dest) + $0100, then L1X += $0100
+    ;     Down  ($AD9E): L2Y = parallax(L1Y_dest) - $00E0, then L1Y -= $00E0
+    ;     Up    ($ADC8): L2Y = parallax(L1Y_dest + $1F) + $00E0, then L1Y += $0100
+    ;   SetupScrolling then saves L2 position as Layer2StartPos.
+    ;
+    ; How Layer2 scrolls:
+    ;   ScrollCamera applies the same absolute pixel offset (from the lookup table) to both L1 and L2,
+    ;   using each layer's own start position. Since L2 start = L2 dest ± (same screen offset as L1),
+    ;   both layers cover the same distance and arrive at their destinations simultaneously.
+    ;
+    ; Known limitation:
+    ;   Because the screen offset is applied as a flat value (not via parallax), L2's intermediate
+    ;   positions during the scroll are slightly incorrect for the parallax ratio. For example, with
+    ;   50% parallax and a 256px scroll, L2 should start 128px from its destination, but actually
+    ;   starts 256px away. Tiles on L2 that use non-fading palette colors would appear slightly out
+    ;   of place during the scroll. This matches vanilla behavior and is nearly invisible in practice
+    ;   since L2 is almost always fully faded to black during transitions.
+    ;
     InitializeLayer2Destinations: {
             LDA !RamLayer1XPosition : PHA
             LDA !RamLayer1YPosition : PHA
