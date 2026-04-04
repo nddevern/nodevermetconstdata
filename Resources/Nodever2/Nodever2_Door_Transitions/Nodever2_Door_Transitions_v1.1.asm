@@ -126,7 +126,7 @@ math pri on
     !BlackTile = #$8081 ; This is the level data for 1 solid black tile in vanilla. The patch writes this in a few places where you can see OOB.
 
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
-    !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
+    !ScreenFadesOut             = 0    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
     ; Don't touch. These constants are for the freespace usage report.
