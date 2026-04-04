@@ -188,12 +188,20 @@ math pri on
     ;    +4: Close a door on next screen
     ;}
 
+    ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
+    !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
+    org !UpDoorYDestinationOffset : dw $0020
+
     ; new variables - can repoint the ram that these use
     !CurRamAddr                                  := !RamStart
     !RamLayer1XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraXTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer1YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamEnd                                      := !CurRamAddr
 
@@ -367,6 +375,7 @@ if !VanillaCode == 0
     org $80AD30
     DoorTransitionScrollingSetup: {
             REP #$30
+            JSR InitializeLayer2Destinations
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
             JSR ($AE08,x) : RTL
     }
@@ -426,6 +435,8 @@ if !VanillaCode == 0
             PHP : REP #$30
             LDA !RamLayer1XPosition : STA !RamLayer1XStartPos
             LDA !RamLayer1YPosition : STA !RamLayer1YStartPos
+            LDA !RamLayer2XPosition : STA !RamLayer2XStartPos
+            LDA !RamLayer2YPosition : STA !RamLayer2YStartPos
             LDA #$0000
             STA !RamCameraXTableIndex
             STA !RamCameraYTableIndex
@@ -434,6 +445,26 @@ if !VanillaCode == 0
         .freespace
     }
     warnpc $80B032
+
+    org !Freespace80
+    InitializeLayer2Destinations: {
+            LDA !RamLayer1XPosition : PHA
+            LDA !RamLayer1YPosition : PHA
+            LDA !RamLayer1XDestination : STA !RamLayer1XPosition
+            LDA !RamLayer1YDestination : STA !RamLayer1YPosition
+            LDA !RamDoorDirection : AND #$0003 : CMP #$0003 : BNE +
+            LDA !UpDoorYDestinationOffset : CLC : ADC !RamLayer1YPosition : STA !RamLayer1YPosition ; I hate vertical doors
+        +   JSR CalculateLayer2Position
+            LDA !RamLayer2XPosition : STA !RamLayer2XDestination
+            LDA !RamLayer2YPosition : STA !RamLayer2YDestination
+            PLA : STA !RamLayer1YPosition
+            PLA : STA !RamLayer1XPosition
+            RTS
+        .freespace
+    }
+    !Freespace80 := InitializeLayer2Destinations_freespace
+    warnpc !Freespace80End
+
 }
 
 ; =======================================================
@@ -466,11 +497,9 @@ if !VanillaCode == 0
                 ; In the long run I would like to find a better solution but this works for now.
                 JSL ScrollCameraX
                 JSL ScrollCameraY
-                JSR CalculateLayer2Position
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 LDA !RamLayer1XStartPos : STA !RamLayer1XPosition
                 LDA !RamLayer1YStartPos : STA !RamLayer1YPosition
-                JSR CalculateLayer2Position
                 JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
                 INC !RamDoorTransitionFrameCounter
                 CLC : RTS
@@ -497,12 +526,10 @@ if !VanillaCode == 0
                 JSL ScrollCameraY : PHP
             endif
 
-            JSR CalculateLayer2Position
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling
             INC !RamDoorTransitionFrameCounter
             PLP : BCC +
             PLP : BCC ++
-            JSR CalculateLayer2Position
             JSL CalculateBGScrollsAndUpdateBGGraphicsWhileScrolling ; why does vanilla call this twice? didn't really observe any effects from commenting this out (yet)
             SEC : RTS
         +   PLP : ++ : CLC : RTS
@@ -520,36 +547,48 @@ if !VanillaCode == 0
     ; Since all of this is being done in an interrupt, we don't want to use misc RAM because that could
     ;  disrupt other code.
     ScrollCameraX: {
+            LDA !RamLayer2XStartPos : PHA
             LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BNE + : PLA : INC : PHA ; tPrimaryDirectionFlag
         +   LDA !RamCameraXTableIndex : PHA
+            LDA !RamLayer2XDestination : PHA
+            LDA !RamLayer2XPosition : PHA
             LDA #$0000 : PHA : LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1XDestination : PHA
             LDA !RamLayer1XPosition : PHA
             LDA !RamLayer1XStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
-            PLA ;: STA !RamLayer1XStartPos ; no need to write back
+            PLA ;: STA !RamLayer1XStartPos; no need to write back
             PLA : STA !RamLayer1XPosition
-            PLA ; !RamLayer1XDestination
+            PLA ;: STA !RamLayer1XDestination
             PLA ; tInvertDirectionFlag
+            PLA : STA !RamLayer2XPosition
+            PLA ; !RamLayer2XDestination
             PLA : STA !RamCameraXTableIndex
             PLA ; tPrimaryDirectionFlag
+            PLA ; !RamLayer2XStartPos
             RTL
     }
 
     ScrollCameraY: {
+            LDA !RamLayer2YStartPos : PHA
             LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BEQ + : PLA : INC : PHA ; tPrimaryDirectionFlag
         +   LDA !RamCameraYTableIndex : PHA
+            LDA !RamLayer2YDestination : PHA
+            LDA !RamLayer2YPosition : PHA
             LDA #$0000 : PHA : LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1YDestination : PHA
             LDA !RamLayer1YPosition : PHA
             LDA !RamLayer1YStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
-            PLA ;: STA !RamLayer1YStartPos ; no need to write back
+            PLA ;: STA !RamLayer1YStartPos; no need to write back
             PLA : STA !RamLayer1YPosition
-            PLA ; !RamLayer1YDestination
+            PLA ;: STA !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
+            PLA : STA !RamLayer2YPosition
+            PLA ; !RamLayer2YDestination
             PLA : STA !RamCameraYTableIndex
             PLA ; tPrimaryDirectionFlag
+            PLA ; !RamLayer2YStartPos
             RTL
     }
 
@@ -605,8 +644,11 @@ if !VanillaCode == 0
         !tLayer1Position                          = !tStackOffset+2,s
         !tLayer1Destination                       = !tStackOffset+4,s
         !tInvertDirectionFlag                     = !tStackOffset+6,s
-        !tCameraTableIndex                        = !tStackOffset+8,s
-        !tPrimaryDirectionFlag                    = !tStackOffset+10,s
+        !tLayer2Position                          = !tStackOffset+8,s
+        !tLayer2Destination                       = !tStackOffset+10,s
+        !tCameraTableIndex                        = !tStackOffset+12,s
+        !tPrimaryDirectionFlag                    = !tStackOffset+14,s
+        !tLayer2StartPos                          = !tStackOffset+16,s
 
             PHP : PHX : PHY : PHA : PHB
             REP #$30
@@ -622,7 +664,7 @@ if !VanillaCode == 0
         ++  CMP !tCameraTableIndex : BEQ .finish : BPL .continue
         .finish
             LDA !tLayer1Destination : STA !tLayer1Position
-            ; Layer 2 position is calculated from layer 1 by CalculateLayer2Position in MainScrollingRoutine
+            LDA !tLayer2Destination : STA !tLayer2Position
             PLB : PLA : PLY : PLX : PLP : SEC : RTS ; done
         .continue
             PHK : PLB ; DB = current bank
@@ -647,10 +689,11 @@ if !VanillaCode == 0
         +   
             LDA !tInvertDirectionFlag : BNE .invert
             LDA !tLayer1StartPos : CLC : ADC $01,s : STA !tLayer1Position
+            LDA !tLayer2StartPos : CLC : ADC $01,s : STA !tLayer2Position
             BRA +
         .invert
             LDA !tLayer1StartPos : SEC : SBC $01,s : STA !tLayer1Position
-            ; Layer 2 position is calculated from layer 1 by CalculateLayer2Position in MainScrollingRoutine
+            LDA !tLayer2StartPos : SEC : SBC $01,s : STA !tLayer2Position
         +   PLA : !tStackOffset := !tBaseStackOffset
 
             LDA !tCameraTableIndex : INC : STA !tCameraTableIndex
@@ -788,6 +831,8 @@ if !VanillaCode == 0
             CMP $09,s : BMI .blackTile       ; If current block is on a different Y level than we started at, load black tile.
             BRA .loadTile
         .horizontalScrolling
+            LDX !RamBlocksToUpdateXBlock : BMI .blackTile   ; X block < 0
+            CPX !RamRoomWidthInBlocks : BPL .blackTile      ; X block >= room width
         .loadTile
             LDA [$36],y : BRA .finish
         .blackTile
