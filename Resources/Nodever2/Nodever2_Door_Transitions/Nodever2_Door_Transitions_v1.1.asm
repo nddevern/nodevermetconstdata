@@ -188,20 +188,12 @@ math pri on
     ;    +4: Close a door on next screen
     ;}
 
-    ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
-    !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
-    org !UpDoorYDestinationOffset : dw $0020
-
     ; new variables - can repoint the ram that these use
     !CurRamAddr                                  := !RamStart
     !RamLayer1XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamLayer2XStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraXTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamLayer2XDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer1YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamLayer2YStartPos                          := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamEnd                                      := !CurRamAddr
 
@@ -375,7 +367,6 @@ if !VanillaCode == 0
     org $80AD30
     DoorTransitionScrollingSetup: {
             REP #$30
-            JSR InitializeLayer2Destinations
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
             JSR ($AE08,x) : RTL
     }
@@ -435,8 +426,6 @@ if !VanillaCode == 0
             PHP : REP #$30
             LDA !RamLayer1XPosition : STA !RamLayer1XStartPos
             LDA !RamLayer1YPosition : STA !RamLayer1YStartPos
-            LDA !RamLayer2XPosition : STA !RamLayer2XStartPos
-            LDA !RamLayer2YPosition : STA !RamLayer2YStartPos
             LDA #$0000
             STA !RamCameraXTableIndex
             STA !RamCameraYTableIndex
@@ -445,26 +434,6 @@ if !VanillaCode == 0
         .freespace
     }
     warnpc $80B032
-
-    org !Freespace80
-    InitializeLayer2Destinations: {
-            LDA !RamLayer1XPosition : PHA
-            LDA !RamLayer1YPosition : PHA
-            LDA !RamLayer1XDestination : STA !RamLayer1XPosition
-            LDA !RamLayer1YDestination : STA !RamLayer1YPosition
-            LDA !RamDoorDirection : AND #$0003 : CMP #$0003 : BNE +
-            LDA !UpDoorYDestinationOffset : CLC : ADC !RamLayer1YPosition : STA !RamLayer1YPosition ; I hate vertical doors
-        +   JSR CalculateLayer2Position
-            LDA !RamLayer2XPosition : STA !RamLayer2XDestination
-            LDA !RamLayer2YPosition : STA !RamLayer2YDestination
-            PLA : STA !RamLayer1YPosition
-            PLA : STA !RamLayer1XPosition
-            RTS
-        .freespace
-    }
-    !Freespace80 := InitializeLayer2Destinations_freespace
-    warnpc !Freespace80End
-    
 }
 
 ; =======================================================
@@ -547,53 +516,40 @@ if !VanillaCode == 0
     warnpc $80AF02
 
     org !FreespaceAnywhere
-    ; forgive me father for I have sinned
     ; Put all variables that ScrollCamera uses on the stack, so we can reuse the code for X and Y.
     ; Since all of this is being done in an interrupt, we don't want to use misc RAM because that could
     ;  disrupt other code.
     ScrollCameraX: {
-            LDA !RamLayer2XStartPos : PHA
             LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BNE + : PLA : INC : PHA ; tPrimaryDirectionFlag
         +   LDA !RamCameraXTableIndex : PHA
-            LDA !RamLayer2XDestination : PHA
-            LDA !RamLayer2XPosition : PHA
             LDA #$0000 : PHA : LDA !RamLayer1XDestination : SEC : SBC !RamLayer1XStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1XDestination : PHA
             LDA !RamLayer1XPosition : PHA
             LDA !RamLayer1XStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
-            PLA ;: STA !RamLayer1XStartPos; no need to write back
+            PLA ;: STA !RamLayer1XStartPos ; no need to write back
             PLA : STA !RamLayer1XPosition
-            PLA ;: STA !RamLayer1XDestination
+            PLA ; !RamLayer1XDestination
             PLA ; tInvertDirectionFlag
-            PLA : STA !RamLayer2XPosition
-            PLA ; !RamLayer2XDestination
             PLA : STA !RamCameraXTableIndex
             PLA ; tPrimaryDirectionFlag
-            PLA ; !RamLayer2XStartPos
             RTL
     }
-    
+
     ScrollCameraY: {
-            LDA !RamLayer2YStartPos : PHA
             LDA #$0000 : PHA : LDA !RamDoorDirection : BIT #$0002 : BEQ + : PLA : INC : PHA ; tPrimaryDirectionFlag
         +   LDA !RamCameraYTableIndex : PHA
-            LDA !RamLayer2YDestination : PHA
-            LDA !RamLayer2YPosition : PHA
             LDA #$0000 : PHA : LDA !RamLayer1YDestination : SEC : SBC !RamLayer1YStartPos : BPL + : PLA : INC : PHA ; tInvertDirectionFlag
         +   LDA !RamLayer1YDestination : PHA
             LDA !RamLayer1YPosition : PHA
             LDA !RamLayer1YStartPos : PHA
             JSR ScrollCamera ; Need to maintain the carry bit after this subroutine
-            PLA ;: STA !RamLayer1YStartPos; no need to write back
+            PLA ;: STA !RamLayer1YStartPos ; no need to write back
             PLA : STA !RamLayer1YPosition
-            PLA ;: STA !RamLayer1YDestination
+            PLA ; !RamLayer1YDestination
             PLA ; tInvertDirectionFlag
-            PLA : STA !RamLayer2YPosition
-            PLA ; !RamLayer2YDestination
             PLA : STA !RamCameraYTableIndex
             PLA ; tPrimaryDirectionFlag
-            PLA ; !RamLayer2YStartPos
             RTL
     }
 
@@ -649,11 +605,8 @@ if !VanillaCode == 0
         !tLayer1Position                          = !tStackOffset+2,s
         !tLayer1Destination                       = !tStackOffset+4,s
         !tInvertDirectionFlag                     = !tStackOffset+6,s
-        !tLayer2Position                          = !tStackOffset+8,s
-        !tLayer2Destination                       = !tStackOffset+10,s
-        !tCameraTableIndex                        = !tStackOffset+12,s
-        !tPrimaryDirectionFlag                    = !tStackOffset+14,s
-        !tLayer2StartPos                          = !tStackOffset+16,s
+        !tCameraTableIndex                        = !tStackOffset+8,s
+        !tPrimaryDirectionFlag                    = !tStackOffset+10,s
 
             PHP : PHX : PHY : PHA : PHB
             REP #$30
