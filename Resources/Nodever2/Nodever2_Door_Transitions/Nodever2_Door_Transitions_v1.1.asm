@@ -1002,7 +1002,7 @@ if !VanillaCode == 0
             LDA !RamLayer1YDestination : STA !RamSamusYPosition
         ...continue
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
-            LDA .defaults_mine,x : JSR .moveSamus
+            LDA.l .defaults_mine,x : JSR .moveSamus
             JMP .finish
 
         ..doorcap
@@ -1030,7 +1030,7 @@ if !VanillaCode == 0
             LDX $078D : LDA $830008,x ; A = [$83:0000 + [door pointer] + 8] (distance to spawn)
             TAX : BPL + ; If negative, use default values
             LDA !RamDoorDirection : AND #$0003 : ASL : TAX
-            LDA .defaults_vanilla,x
+            LDA.l .defaults_vanilla,x
         +   TAX ; A and X contain door distance to spawn or default
             LSR #2 : PHA ; Convert vanilla door distance to spawn to pixels (vertical doors still need adjustment)
             LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
@@ -1092,7 +1092,7 @@ if !VanillaCode == 0
         .defaults ; right, left, down, up
         ..vanilla
         if !PlaceSamusAlgorithm == 1 || !PlaceSamusAlgorithm == 4
-            dw $00C8 ; right (vanilla door distance to spawn, pre LSR #2 conversion)
+            dw $00C8 ; right
             dw $00C8 ; left
             dw $0180 ; down
             dw $0180 ; up
