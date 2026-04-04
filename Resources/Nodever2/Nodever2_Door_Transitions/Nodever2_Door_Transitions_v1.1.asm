@@ -43,7 +43,7 @@ math pri on
 ;      > I got stuck in the ceiling after leaving Mother Brain's room - was able to get out and not get softlocked
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
-; 2026-02-?? v1.1:
+; 2026-04-04 v1.1:
 ;   * Added many options:
 ;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
 ;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes. This replaces the option TransitionAnimation - this is just a more customizable version.
@@ -55,26 +55,7 @@ math pri on
 ;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
 ;   * Fixed scrolling bugs for BG1, BG2 that would occur when the screen is scrolling while OOB in the negative X direction.
 ;   * Updated SM's scrolling code to not render OOB tiles. Collision is unaffected.
-;   todo: reach out to ocesse,
-;         look into amoeba scrolling sky ram conflict,
-;         test test test
-;          > test bg2 position calculation when bg2 x/y scroll is not 0% or 100% and bg1 x/y is negative
-;         especially pixel offset samus placement mode
-;-    ;  > test address edge cases (like if the address to compare to lines up exactly)
-;-    ;  > make logic to more smartly figure out which screens to pad instead of doing the entire room width - for wide rooms this creates noticeable lag
-;-    ;  > look into top/sides of room problems (dynamically expand room in the background? -> scrolls would make this not fun, who knows what else would be messed up too, PLMs probably would be...)
-;-    ;    (could patch the scrolling routine for this... idk)
-;-    ;  > add an option to disable this behavior
-    ;  > add options for default samus positions etc
-    ;  > test all samus algorithms and... the rest of the new settings
-    ;  > TODO: EightBitMultiplication truncates scroll distances > 255 pixels.
-    ;         The lookup table value is 8-bit (0-255) and the distance can be 16-bit,
-    ;         but the current 8x8 software multiply discards the high byte of distance.
-    ;         This means rooms requiring > 255px of scrolling in one axis will have
-    ;         incorrect easing (the offset will wrap). Fix by extending to a 16x8 multiply:
-    ;         split distance into high/low bytes, multiply each by the table value separately,
-    ;         then combine: result = (dist_hi * table_val) << 8 + (dist_lo * table_val).
-    ;         Cannot use hardware multiply registers ($4202/$4203) because this runs in IRQ context.
+;   * Moved RAM usage in hopes that the conflict with amoeba's scrolling sky is resolved.
 
 ; =================================================
 ; ============== VARIABLES/CONSTANTS ==============
@@ -126,7 +107,7 @@ math pri on
     !BlackTile = #$8081 ; This is the level data for 1 solid black tile in vanilla. The patch writes this in a few places where you can see OOB.
 
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
-    !ScreenFadesOut             = 0    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
+    !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
 
     ; Don't touch. These constants are for the freespace usage report.
@@ -214,16 +195,6 @@ math pri on
 ; ============== NOTES ===============
 ; ====================================
 {
-    ; roadmap/ideas:
-    ; 1.0:
-    ;  - Parity with vanilla door transition functionality but with better/faster animation and customizability
-    ;  - Fixed dma flickering - now, if you place doors not in the middle of the screen, they won't flicker at all during the transition, because I move the DMA Y position dynamically.
-    ; 1.1:
-    ;  - add a way to control where samus is placed in each transition if the user wants it to work that way
-    ;  - figure out a way to make the patch error out or report if the speed is too fast
-    ;  - add more door movement speed algorithm options, i.e. ease in and ease out, maybe being able to customize acceleration/deceleration speeds too. add a linear scrolling option too.
-    ;  - option to pad level data with zeroes to avoid seeing artifacts (in smaller rooms anyway) - ex moving upwards while screen not aligned out of post phantoon room shows artifacts.
-    ;  - and add an option for the door to align itself before doing main scrolling like vanilla.
     ; 1.2 (tentative):
     ;  - customization option to allow an option to NOT align the screen. this would be useful for rooms with a continuous wall of door transition tiles on the edge - i.e. outdoor rooms
     ;  - when H door is centered, flashing is intersecting escape timer... fix
@@ -232,6 +203,15 @@ math pri on
     ;  - make the SM scrolling code updates only apply if two phase scrolling is disabled (this would require moving secondary scrolling back to before the new room gets loaded as in vanilla - a big change)
     ; 1.x:
     ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
+    ;  - todo: reach out to ocesse,
+    ;  - TODO: EightBitMultiplication truncates scroll distances > 255 pixels.
+    ;         The lookup table value is 8-bit (0-255) and the distance can be 16-bit,
+    ;         but the current 8x8 software multiply discards the high byte of distance.
+    ;         This means rooms requiring > 255px of scrolling in one axis will have
+    ;         incorrect easing (the offset will wrap). Fix by extending to a 16x8 multiply:
+    ;         split distance into high/low bytes, multiply each by the table value separately,
+    ;         then combine: result = (dist_hi * table_val) << 8 + (dist_lo * table_val).
+    ;         Cannot use hardware multiply registers ($4202/$4203) because this runs in IRQ context.
 }
 
 ; ====================================
@@ -1049,10 +1029,9 @@ if !VanillaCode == 0
         .vanilla
             LDX $078D : LDA $830008,x ; A = [$83:0000 + [door pointer] + 8] (distance to spawn)
             TAX : BPL + ; If negative, use default values
-            LDX #$0180 ; Vertical default
-            LDA !RamDoorDirection : BIT #$0002 : BNE + ;\
-            LDX #$00C8                                 ;) If horizontal door, use horizontal default
-        +   TXA ; A and X contain door distance to spawn or default
+            LDA !RamDoorDirection : AND #$0003 : ASL : TAX
+            LDA .defaults_vanilla,x
+        +   TAX ; A and X contain door distance to spawn or default
             LSR #2 : PHA ; Convert vanilla door distance to spawn to pixels (vertical doors still need adjustment)
             LDA !RamDoorDirection : BIT #$0002 : BNE ..verticalTransition
         ..horizontalTransition
@@ -1111,6 +1090,13 @@ if !VanillaCode == 0
             RTS
 
         .defaults ; right, left, down, up
+        ..vanilla
+        if !PlaceSamusAlgorithm == 1 || !PlaceSamusAlgorithm == 4
+            dw $00C8 ; right (vanilla door distance to spawn, pre LSR #2 conversion)
+            dw $00C8 ; left
+            dw $0180 ; down
+            dw $0180 ; up
+        endif
         ..mine
         if !PlaceSamusAlgorithm == 2 || !PlaceSamusAlgorithm == 4
             dw $0030 ; right
