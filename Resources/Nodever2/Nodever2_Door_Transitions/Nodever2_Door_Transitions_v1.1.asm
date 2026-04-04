@@ -88,7 +88,7 @@ math pri on
     !FreespaceAnywhere        = $B88000 ; Anywhere in banks $80-$BF
     !FreespaceAnywhereEnd     = $B8FFFF
     !RamBank                  = $7F0000
-    !RamStart                #= $FB46+!RamBank
+    !RamStart                #= $FC02+!RamBank ; $FB02-$FC01 is used by Amoeba's Custom Scrolling Sky patch; $FE00-$FFFF is used by saveload patch
 
     !ScreenFadeDelay          = #$0004 ; ScreenFadeDelay: Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
 
