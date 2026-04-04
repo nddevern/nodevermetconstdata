@@ -8,7 +8,8 @@ math pri on
 ; Nodever2's door transitions
 ;   By now, several of us have rewritten door transitions - this is my take on it.
 ;   This patch includes many customization options, allowing you to make them work exactly how you want.
-;   Patch showcase video: https://youtu.be/rkpMoOeFj3Y
+;   V1.0 showcase video: https://youtu.be/rkpMoOeFj3Y
+;   V1.1 showcase video: https://youtu.be/3M7aj3aaaks
 
 ; by Nodever2 November 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
@@ -54,7 +55,7 @@ math pri on
 ;        It will warn you in the console when assembling the patch if it thinks it is fast enough to risk bugs.
 ;   * Fixed a softlock that could occur in certain situations due to a race condition. Thanks OmegaDragnet for the report.
 ;   * Fixed scrolling bugs for BG1, BG2 that would occur when the screen is scrolling while OOB in the negative X direction.
-;   * Updated SM's scrolling code to not render OOB tiles. Collision is unaffected.
+;   * Updated SM's scrolling code to not render OOB tiles or screen wrapped tiles. Collision is unaffected.
 ;   * Moved RAM usage in hopes that the conflict with amoeba's scrolling sky is resolved.
 
 ; =================================================
