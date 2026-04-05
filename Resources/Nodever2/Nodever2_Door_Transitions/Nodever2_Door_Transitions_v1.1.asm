@@ -110,6 +110,11 @@ math pri on
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
     !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
+    !VramChunkMax             = $0800  ; VramChunkMax: Maximum bytes to DMA per frame during door transition VRAM updates.
+                                       ;     Vanilla transfers all data in one frame (~50 scanlines of forced blank), which can cause lag.
+                                       ;     This splits large transfers into chunks of !VramChunkMax bytes per frame.
+                                       ;     At $0800 (2048 bytes), each chunk takes ~12 scanlines. A typical ~8KB transfer splits into ~4 frames.
+                                       ;     Set to $FFFF to disable chunking (vanilla behavior).
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
@@ -169,6 +174,11 @@ math pri on
     ;    3: Up
     ;    +4: Close a door on next screen
     ;}
+    !RamDoorVramUpdateFlag                = $05BC ; 16-bit. Bit 15 = VRAM transfer pending.
+    !RamDoorVramUpdateDestination         = $05BE ; 16-bit. VRAM destination address (in words).
+    !RamDoorVramUpdateSource              = $05C0 ; 16-bit. DMA source address (low 16 bits).
+    !RamDoorVramUpdateSourceBank          = $05C2 ; 8-bit. DMA source bank.
+    !RamDoorVramUpdateSize                = $05C3 ; 16-bit. DMA transfer size (in bytes).
 
     ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
     !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
@@ -1118,6 +1128,12 @@ if !VanillaCode == 0
     org $8097A2 : LDY #$00A0 ; vertical
     org $809803 : LDY #$00A0 ; horizontal
 
+    ; Hijack vanilla ExecuteDoorTransitionVRAMUpdate to use our chunked version.
+    ; All callers JSR $9632, so JSL+RTS here works — RTL returns here, then RTS returns to the caller.
+    org $809632
+        JSL ChunkedVramTransfer
+        RTS
+
     org $809793
         JSR CheckIfVramUpdateNeeded_vertical_topOfScreen
 
@@ -1129,34 +1145,116 @@ if !VanillaCode == 0
 
     org $80980F
         JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
+
+    ; Chunked VRAM transfer: splits large DMA transfers across multiple frames to reduce IRQ pressure.
+    ; Called via JSL from $9632. All callers had 16-bit A (REP #$20) active.
+    ; Updates !RamDoorVramUpdateSource, !RamDoorVramUpdateDestination, !RamDoorVramUpdateSize in-place after each chunk.
+    ; Only clears the !RamDoorVramUpdateFlag pending flag after the last chunk completes.
+    org !FreespaceAnywhere
+    ChunkedVramTransfer: {
+            ; A is 16-bit on entry
+            ; Guard: skip if no transfer is pending (bit 15 of flag clear).
+            ; The vanilla $9632 routine had this check internally. Two of the four callers
+            ; (vertical_topOfScreen, horizontal_bottomOfScreen) rely on $9632 to check the flag
+            ; rather than checking it themselves, so this guard must remain here.
+            LDA !RamDoorVramUpdateFlag : BPL .noTransfer
+
+            LDA !RamDoorVramUpdateSize          ; remaining transfer size
+            CMP #!VramChunkMax+1
+            BCC .useRemaining               ; if remaining <= chunk max, transfer all of it
+            LDA #!VramChunkMax              ; else cap at chunk max
+        .useRemaining:
+            PHA                             ; push this_chunk_size
     
+            ; Force blank
+            SEP #$20
+            LDA #$80 : STA $2100
+    
+            ; Configure DMA channel 1
+            LDX !RamDoorVramUpdateDestination : STX $2116 ; VRAM destination
+            LDX #$1801 : STX $4310                    ; DMA control: 16-bit VRAM write (register $2118, mode 1)
+            LDX !RamDoorVramUpdateSource : STX $4312      ; DMA source address
+            LDA !RamDoorVramUpdateSourceBank : STA $4314  ; DMA source bank
+            LDA #$80 : STA $2115                      ; VRAM address increment mode (increment after high byte write)
+            REP #$20
+            LDA $01,s : STA $4315                     ; DMA size = this_chunk_size from stack
+            SEP #$20
+            LDA #$02 : STA $420B                      ; Execute DMA on channel 1
+    
+            ; Update source, dest, remaining in-place for next chunk
+            REP #$20
+    
+            ; source address += this_chunk_size
+            LDA $01,s
+            CLC : ADC !RamDoorVramUpdateSource
+            STA !RamDoorVramUpdateSource
+    
+            ; VRAM dest += this_chunk_size / 2 (VRAM addresses are in words, DMA size is in bytes)
+            LDA $01,s
+            LSR A
+            CLC : ADC !RamDoorVramUpdateDestination
+            STA !RamDoorVramUpdateDestination
+    
+            ; remaining -= this_chunk_size
+            LDA !RamDoorVramUpdateSize
+            SEC : SBC $01,s
+            STA !RamDoorVramUpdateSize
+    
+            PLA                             ; clean this_chunk_size off stack
+    
+            ; If remaining == 0, transfer is complete
+            LDA !RamDoorVramUpdateSize
+            BNE .moreRemaining
+
+            ; Transfer complete: clear the pending flag so Bank $82 polling loop can continue
+            LDA #$8000 : TRB !RamDoorVramUpdateFlag
+
+        .moreRemaining:
+            ; If more data remains, flag stays set.
+            ; Next frame's IRQ will call $9632 again, which JSLs here for the next chunk.
+
+            SEP #$20
+            LDA #$0F : STA $2100            ; restore screen brightness (disable forced blank)
+        .noTransfer:
+            REP #$20                        ; match original routine's exit state (16-bit A)
+            RTL
+    
+            .freespace
+    }
+    !FreespaceAnywhere := ChunkedVramTransfer_freespace
+    warnpc !FreespaceAnywhereEnd
+
     org !Freespace80
     CheckIfVramUpdateNeeded: {
         .vertical
         ..topOfScreen
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL +
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL ++
             JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
-        +   RTS
+        ++  RTS
         ..bottomOfScreen
             PHA ; need to preserve A here due to the routine we hijacked
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI +
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI ++
             ; Door tube is high - execute VRAM update now if needed.
-            LDX $05BC : BPL + : JSR $9632
-        +   PLA
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  PLA
             LDY #$0000 ; instruction replaced by hijack
             RTS
 
         .horizontal
         ..topOfScreen
-            JSR ..compareYPosition : BMI +
+            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
+            JSR ..compareYPosition : BMI ++
             ; Door is low - move down if needed.
-            LDX $05BC : BPL + : JSR $9632
-        +   LDA $9031 ; instruction replaced by hijack
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  LDA $9031 ; instruction replaced by hijack (todo: is this wrong?)
             RTS
         ..bottomOfScreen
-            JSR ..compareYPosition : BPL +
+            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
+            JSR ..compareYPosition : BPL ++
             JSR $9632 ; Door is high - execute VRAM update now. (Caller already checked if it's needed.)
-        +   RTS
+        ++  RTS
 
         ..compareYPosition
             LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
