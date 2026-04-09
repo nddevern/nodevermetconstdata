@@ -116,6 +116,23 @@ math pri on
                                        ;     At $0800 (2048 bytes), each chunk takes ~12 scanlines. A typical ~8KB transfer splits into ~4 frames.
                                        ;     Set to $FFFF to disable chunking (vanilla behavior).
 
+    !EarlyMusicUpload               = 1 ; Start async SPC music upload as early as possible during door transitions.
+                                        ;     Vanilla queues music data at $82:E4AD (late), then imposes a 16-frame queue delay (2 × 8 frames from $808FC1)
+                                        ;     before the upload state machine actually begins reading source data. This means old music keeps playing
+                                        ;     most of the way through the door transition, and the async upload has less time to complete before
+                                        ;     the fade-in. When this is set, a hook after $82:DEF2 (state header load, which sets $07CB = new music
+                                        ;     data index) starts the async upload immediately, and the vanilla $82:E071 call at $82:E4AD becomes a no-op.
+                                        ;     0: Vanilla timing - upload starts ~16+ frames after $82:E4AD.
+                                        ;     1: Start upload as soon as $07CB is known (right after $82:DEF2 state header load).
+    !WaitForMusicUploadBeforeFadeIn = 1 ; Block the door transition fade-in until the async music upload has fully completed.
+                                        ;     Without this, our PreUploadHook clears the music queue entry immediately on async upload start,
+                                        ;     so $82:E664's "music queued?" check returns false even though the upload is still pumping bytes.
+                                        ;     Game state then advances to main gameplay ($08) with audio silent until upload finishes, after
+                                        ;     which all queued SFX fire at once. With this enabled, $82:E664 additionally waits for
+                                        ;     !RamAsyncSpcState == 0 (idle) before advancing to $E6A2.
+                                        ;     0: Vanilla behavior - fade in immediately after queue clears (may result in silent main gameplay).
+                                        ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
+
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
     !Freespace80ReportStart := !Freespace80
@@ -1202,6 +1219,47 @@ if !VanillaCode == 0
     org $82896E
         JSL AsyncSpcUpload_SoundHandlerGuard
 
+    if !EarlyMusicUpload
+        ; Early music upload start: hijack $82:E37F (JSL $8882C1 "Initialise special effects for new room")
+        ; inside door transition function $82:E36E. By this point, $82:DEF2 has already run at $82:E379
+        ; (three instructions earlier), which loaded the state header and set $07CB = new room's music
+        ; data index. We replace the JSL $8882C1 with a JSL to our wrapper that calls $8882C1 and then
+        ; kicks off the async SPC upload immediately. The vanilla $82:E071 call at $82:E4AD will then
+        ; become a no-op because our EarlyStart updates $07F3 = $07CB.
+        ; Vanilla bytes: 22 C1 82 88 (4 bytes). Our replacement is also 4 bytes (JSL long).
+        org $82E37F
+            JSL AsyncSpcUpload_EarlyStartHook
+    endif
+
+    if !WaitForMusicUploadBeforeFadeIn
+        ; Wait for async music upload to complete before advancing past $82:E664.
+        ; Vanilla $82:E664: calls $808EF4 (is music queued?), and if not, advances door transition
+        ; function to $82:E6A2 and calls $82:E0D5 (load new music track). But our async upload path
+        ; clears the music queue entry IMMEDIATELY (via the PreUploadHook's skip to $8F82), so
+        ; $808EF4 returns "queue empty" even while the upload is still pumping bytes. The transition
+        ; then advances to $E6A2 → $E737 → main gameplay (game state 8) with silent audio until the
+        ; upload finally completes, after which queued SFX all fire at once.
+        ;
+        ; Fix: replace $82:E664's body in place, inserting an additional check on !RamAsyncSpcState.
+        ; Original body is 17 bytes ($E664..$E674 inclusive). The replacement is slightly longer, so
+        ; we extend into the space currently occupied by the unused door transition function at
+        ; $82:E675 (which is 45 bytes of dead code — verified unused per PJBoy's notes).
+        org $82E664
+            ; $82:E664: Door transition function - wait for music queue to clear AND async upload
+            ;           to complete, then load new music track and advance to $E6A2.
+            JSL $808EF4                             ; check music queue (sets carry if any timer != 0)
+            BCS +                                   ; if queued: return (wait next frame)
+            LDA !RamAsyncSpcState                   ; check async upload state (16-bit, M=0 from $E288)
+            BNE +                                   ; if active: return (wait next frame)
+            LDA #$E6A2 : STA $099C                  ; advance door transition function to $E6A2
+            JSL $82E0D5                             ; load new music track if changed
+        +   RTS
+
+        ; Guard: the replacement must fit before $82:E6A2 (next live function).
+        ; Occupies $E664..(new end), overwriting the unused $82:E675 function.
+        warnpc $82E6A2
+    endif
+
     ; Chunked VRAM transfer: splits large DMA transfers across multiple frames to reduce IRQ pressure.
     ; Called via JSL from $9632. All callers had 16-bit A (REP #$20) active.
     ; Updates !RamDoorVramUpdateSource, !RamDoorVramUpdateDestination, !RamDoorVramUpdateSize in-place after each chunk.
@@ -1395,6 +1453,85 @@ if !VanillaCode == 0
         ; Restore A (the LDA $8FE7E1,x result) and return to $8F76.
         ; Normal flow continues: STA $00, LDA, STA $01, then $8F7E (total's upload).
         PLA
+        RTL
+
+    ; ---- Early start hook: hijack entry point for $82:E37F ----
+    ; Vanilla $82:E37F is `JSL $8882C1` (Initialise special effects for new room). Our hijack
+    ; replaces that JSL with `JSL AsyncSpcUpload_EarlyStartHook`, which first executes the
+    ; replaced instruction and then tail-jumps into .EarlyStart. The tail jump is safe because
+    ; .EarlyStart's final RTL will return to the caller of this hook (= the caller of the
+    ; vanilla $82:E37F instruction = door transition function $82:E36E).
+    .EarlyStartHook:
+        JSL $8882C1                             ; execute the replaced instruction
+        JMP .EarlyStart                         ; tail call: .EarlyStart RTLs for us
+
+    ; ---- Early start: kick off async upload the instant $07CB is known ----
+    ; Called from the $82:E37F hijack wrapper, immediately after $JSR $DEF2 (state header load)
+    ; has set $07CB = new room's music data index. At this point we're inside door transition
+    ; function $82:E36E, game state = $0B, and screen is fully faded to black.
+    ;
+    ; Vanilla flow otherwise: $82:E071 is called at $82:E4AD (much later), which queues music
+    ; stop + music data into $0619/$0629 via $808FC1. Each queue entry sets an 8-frame timer,
+    ; so the actual `LDA $8FE7E1,x` hook doesn't fire for ~16 frames AFTER $E4AD. Net delay
+    ; from "touched door" to "old music stops playing" is ~50-70 frames.
+    ;
+    ; With this hook, we bypass the music queue entirely and start our async state machine
+    ; directly from the $8F:E7E1 pointer table. We also update $07F3 = $07CB so the later
+    ; $82:E071 call at $E4AD becomes a no-op (its `CMP $07F3 : BEQ return` check fires).
+    ;
+    ; Preconditions on entry:
+    ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
+    ;   - P state is whatever $82:E36E was in — we PHP/PLP to restore
+    ; Postconditions:
+    ;   - If $07CB == 0 or $07CB == $07F3 (no music change): no-op
+    ;   - If already uploading (!RamAsyncSpcState != 0): no-op
+    ;   - Otherwise: async upload started, $0617 set, $07F3 updated, state = Init
+    .EarlyStart:
+        PHP
+        PHB
+        REP #$30
+        PHX
+
+        ; Skip if async upload already in progress (e.g., re-entry, or door asm ran twice)
+        LDA !RamAsyncSpcState : BNE .EsReturn
+
+        ; Load new room's music data index ($07CB is set by $82:DEF2).
+        ; Vanilla $82:DF3B-$DF3E masks with #$00FF and stores as 16-bit, so $07CC = 0 — a
+        ; plain 16-bit read gives the value directly.
+        LDA $07CB : BEQ .EsReturn               ; if index = 0: no music → skip
+        CMP $07F3 : BEQ .EsReturn               ; if same as current music data: no change → skip
+
+        ; New room's music differs. Start async upload immediately.
+        ; Update $07F3 so the later $82:E071 at $E4AD sees "no change" and becomes a no-op.
+        STA $07F3
+
+        ; Fetch source pointer from the music data pointer table at $8F:E7E1.
+        ; Table entries are 3 bytes each (24-bit pointers); the music data index in $07CB
+        ; is a pre-multiplied byte offset (0, 3, 6, 9, ...).
+        ; DB may be $82 here, so temporarily set DB = $8F for the table access.
+        TAX                                     ; X = music data index (byte offset)
+        PHB
+        PEA $8F8F : PLB : PLB                   ; DB = $8F
+        LDA $E7E1,x                             ; 16-bit: low 2 bytes of 3-byte pointer = offset
+        STA !RamAsyncSpcDataY                   ; save source offset (low 16 bits)
+        SEP #$20
+        LDA $E7E3,x                             ; 8-bit: 3rd byte of pointer = bank
+        STA !RamAsyncSpcDataBank                ; save source bank
+        LDA #$FF : STA $064C                    ; current music track = $FF (match $80:8F6D)
+        LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
+        REP #$20
+        PLB                                     ; restore DB
+
+        ; Set uploading flag (guards sound handler / music queue handler from APU port writes)
+        LDA #$FFFF : STA $0617
+
+        ; Initial state: wait for SPC to respond with $11AA on IO 2-3
+        LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+
+    .EsReturn:
+        PLX
+        PLB
+        PLP
         RTL
 
     ; ---- Pump wrapper for scroll wait loop ($82:E526 hijack) ----
@@ -1782,15 +1919,24 @@ if !VanillaCode == 0
         ; Upload in progress — skip the ENTIRE music queue handler.
         ; Stack right now (top to bottom):
         ;   [3 bytes] return addr → $808F11 (from JSL at $808F0D)
-        ;   [1 byte]  P from the vanilla PHP at $808F0C (the one we kept)
-        ;   [3 bytes] return addr → $80:A13A (from JSL $808F0C at $80:A136)
+        ;   [1 byte]  P from the vanilla PHP at $808F0C (the caller's original P)
+        ;   [3 bytes] return addr → caller of $808F0C (outer return addr)
         ;
-        ; To skip cleanly: discard inner return addr + vanilla PHP,
-        ; then RTL to reach the outer caller at $80:A13A.
+        ; To skip cleanly: discard the inner return addr, restore the vanilla P (so the
+        ; caller sees its original P state — critical: M must match what the caller had,
+        ; otherwise the caller's subsequent instructions decode with the wrong width),
+        ; then RTL to return to the outer caller.
+        ;
+        ; CRITICAL: vanilla's $808F0C always exits via PLP+RTL, so the caller expects
+        ; its original P restored. Any caller (NMI wait at $80:A136, message box at
+        ; $85:85A1, etc.) breaks if we leave the M flag in the wrong state. The original
+        ; bug here was PLA'ing the vanilla PHP instead of PLP'ing it, leaving the caller
+        ; with M=1 from our SEP #$20 and causing misdecoded instructions (BRK crash at
+        ; $85:85B3 when grabbing items while async upload was still in progress).
         SEP #$20                                ; force 8-bit A so PLA pulls 1 byte each
-        PLA : PLA : PLA                         ; discard 3-byte return addr (→ $808F11)
-        PLA                                     ; discard vanilla PHP (1 byte)
-        RTL                                     ; return to $80:A13A via outer return addr
+        PLA : PLA : PLA                         ; discard 3-byte inner return addr (→ $808F11)
+        PLP                                     ; restore caller's P state from vanilla PHP
+        RTL                                     ; return to outer caller (any caller, not just $80:A13A)
 
         .freespace
     }
