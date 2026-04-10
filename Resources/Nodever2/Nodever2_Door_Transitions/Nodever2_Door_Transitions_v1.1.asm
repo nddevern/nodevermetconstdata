@@ -132,6 +132,22 @@ math pri on
                                         ;     !RamAsyncSpcState == 0 (idle) before advancing to $E6A2.
                                         ;     0: Vanilla behavior - fade in immediately after queue clears (may result in silent main gameplay).
                                         ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
+    !MusicStopWaitFrames            = $08 ; Frames to wait between sending "stop music" ($00) and "start fast upload" ($FE) in EarlyStart.
+                                        ;     The SPC music engine is typically mid-note (DSP voices sustaining) when we interrupt it. If we
+                                        ;     jump straight to the fast upload ($FE) without first giving the engine time to process a stop
+                                        ;     command and key-off its active voices, the DSP keeps playing the last-loaded samples while we
+                                        ;     overwrite ARAM — producing stuck notes and audible glitches as samples are replaced in real
+                                        ;     time. Vanilla's music queue imposes an identical 8-frame gap between the stop entry and the
+                                        ;     data entry via $808FC1 (see $82:E087/$E091 → JSL $808FC1, 8-frame timer each).
+                                        ;     Frame counting uses $05B8 (the 16-bit NMI counter, incremented every NMI in BRANCH_RETURN).
+                                        ;     We deliberately do NOT use $05B5 (the 8-bit non-lag game frame counter) because during door
+                                        ;     transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0 every frame, making any
+                                        ;     wait against it impossible to satisfy. $05B8 is the only frame-like counter that advances
+                                        ;     reliably across door transitions. Note this counts ALL NMIs including lag frames, but during
+                                        ;     a door transition the game runs at full speed so the difference is negligible.
+                                        ;     Only used when !EarlyMusicUpload = 1; the vanilla PreUploadHook path already inherits vanilla's
+                                        ;     8-frame queue gap naturally.
+                                        ;     Range: $0001..$7FFF (signed 16-bit delta). $08 matches vanilla timing.
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
@@ -219,6 +235,7 @@ math pri on
     !RamAsyncSpcDataBank                         := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source bank (low byte used, stored as word for convenience)
     !RamAsyncSpcBlockSize                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Remaining bytes in current block
     !RamAsyncSpcIndex                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current handshake counter byte (low byte used)
+    !RamAsyncSpcStopWaitTarget                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; EarlyStart stop-wait: target value of $05B8 (16-bit NMI counter) at which StateStopWait sends $FE
     !RamEnd                                      := !CurRamAddr
 
     ; note/todo: we can use 092b and 092d if we just stop the game from setting them
@@ -1380,6 +1397,7 @@ if !VanillaCode == 0
     !AsyncSpcStateTransfer  = $0008
     !AsyncSpcStateEofWait   = $000A
     !AsyncSpcStateComplete  = $000C
+    !AsyncSpcStateStopWait  = $000E             ; EarlyStart only: wait N frames after "stop music" ($00) before sending $FE
 
     org !FreespaceAnywhere
     AsyncSpcUpload: {
@@ -1479,13 +1497,24 @@ if !VanillaCode == 0
     ; directly from the $8F:E7E1 pointer table. We also update $07F3 = $07CB so the later
     ; $82:E071 call at $E4AD becomes a no-op (its `CMP $07F3 : BEQ return` check fires).
     ;
+    ; Music-stop sequencing: we do NOT send $FE immediately. Vanilla's music queue path imposes
+    ; an 8-frame delay between "stop music" ($00) and "upload data" because each $808FC1 call
+    ; primes an 8-frame queue timer. The gap gives the SPC music engine time to read $00 from
+    ; IO 0, process it through dispatch, and key-off any sustaining DSP voices before we start
+    ; overwriting ARAM. Without this gap, the DSP keeps playing the last-loaded samples until
+    ; we clobber them mid-note, producing stuck notes and sample-swap glitches.
+    ;
+    ; We match vanilla timing: write $00 to IO 0 here, capture $05B8 + !MusicStopWaitFrames as
+    ; the target frame, and transition to .StateStopWait. StateStopWait polls $05B8 from the
+    ; pump loop and, once the target is reached, writes $FE and transitions to .StateInit.
+    ;
     ; Preconditions on entry:
     ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
     ;   - P state is whatever $82:E36E was in — we PHP/PLP to restore
     ; Postconditions:
     ;   - If $07CB == 0 or $07CB == $07F3 (no music change): no-op
     ;   - If already uploading (!RamAsyncSpcState != 0): no-op
-    ;   - Otherwise: async upload started, $0617 set, $07F3 updated, state = Init
+    ;   - Otherwise: "stop music" queued to SPC, $0617 set, $07F3 updated, state = StopWait
     .EarlyStart:
         PHP
         PHB
@@ -1518,15 +1547,32 @@ if !VanillaCode == 0
         LDA $E7E3,x                             ; 8-bit: 3rd byte of pointer = bank
         STA !RamAsyncSpcDataBank                ; save source bank
         LDA #$FF : STA $064C                    ; current music track = $FF (match $80:8F6D)
-        LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
-        REP #$20
+
+        ; Stage 1: send "stop music" ($00) to IO 0 and arm the StopWait countdown.
+        ; The SPC music engine's dispatch loop will see $00 on IO 0, interpret it as a music
+        ; track index of 0, and kill the current song. We then wait !MusicStopWaitFrames frames
+        ; (matching vanilla's $808FC1 timer) before sending $FE to request fast upload mode.
+        ; (STZ has no long form; we use LDA/STA long instead. DB = $8F here, so WRAM mirror
+        ; $0000-$1FFF is reachable — $05B8 is a plain absolute load.)
+        LDA #$00 : STA $002140                  ; IO 0 = $00 (stop music command)
+        REP #$20                                ; 16-bit A for 16-bit NMI counter
+        LDA $05B8                               ; current 16-bit NMI counter (WRAM mirror at DB=$8F)
+        CLC : ADC.w #!MusicStopWaitFrames       ; target = now + wait (16-bit wrap OK, compared signed in StateStopWait).
+                                                ;   .w suffix is REQUIRED — asar's immediate-size heuristic uses the hex
+                                                ;   digit count of the literal, not the M flag, so a 2-digit value like
+                                                ;   $08 would otherwise be emitted as an 8-bit immediate (2 bytes), causing
+                                                ;   the next instruction's opcode byte to be consumed as the high byte of
+                                                ;   the immediate at runtime — silently dropping the STA below.
+        STA !RamAsyncSpcStopWaitTarget          ; save target (full 16-bit)
         PLB                                     ; restore DB
 
-        ; Set uploading flag (guards sound handler / music queue handler from APU port writes)
+        ; Set uploading flag (guards sound handler / music queue handler from APU port writes).
+        ; Must be set BEFORE returning so that the sound handler, which runs later in the same
+        ; frame at $82:896E, skips itself and doesn't stomp our $00 write to IO 0.
         LDA #$FFFF : STA $0617
 
-        ; Initial state: wait for SPC to respond with $11AA on IO 2-3
-        LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+        ; Initial state: StopWait (countdown, then send $FE and transition to Init).
+        LDA #!AsyncSpcStateStopWait : STA !RamAsyncSpcState
 
     .EsReturn:
         PLX
@@ -1586,12 +1632,52 @@ if !VanillaCode == 0
         dw .StateTransfer                       ; 8 = Transfer
         dw .StateEofWait                        ; 10 = EofWait
         dw .StateComplete                       ; 12 = Complete
+        dw .StateStopWait                       ; 14 = StopWait (EarlyStart only)
+
+    ; ---- State: StopWait (EarlyStart only) ----
+    ; Entered from .EarlyStart after writing $00 (stop music) to IO 0 and arming
+    ; !RamAsyncSpcStopWaitTarget = ($05B8 at entry) + !MusicStopWaitFrames.
+    ;
+    ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
+    ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
+    ; clobber ARAM with fast upload data. Vanilla achieves the same effect via two back-to-
+    ; back $808FC1 calls, each priming an 8-frame music queue timer.
+    ;
+    ; Frame counter: $05B8 is the 16-bit NMI counter (incremented every NMI in BRANCH_RETURN
+    ; at $80:95F9, including via the BRANCH_LAG fall-through). We deliberately do NOT use
+    ; $05B5 — during door transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0
+    ; every frame, so a wait against $05B5 can never be satisfied. $05B8 is the only frame-
+    ; like counter that advances reliably across door transitions. The state machine pump is
+    ; called many times per frame from .ScrollWaitPump / .NmiWaitPump loops, so we just poll
+    ; $05B8 each dispatch.
+    ;
+    ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
+    ; passed the target. This tolerates 16-bit wraparound as long as the wait is < 32768
+    ; frames (!MusicStopWaitFrames range $0001..$7FFF; default $0008).
+    ;
+    ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
+    ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
+    .StateStopWait:
+        REP #$20
+        LDA $05B8                               ; current 16-bit NMI counter
+        SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
+        BMI .SwWaiting                          ; if current < target (bit 15 set): still waiting
+
+        ; Wait satisfied. Kick off the fast upload.
+        SEP #$20
+        LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
+        REP #$20
+        LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+        RTS
+    .SwWaiting:
+        RTS
 
     ; ---- State: Init ----
     ; Wait for SPC to respond with $11AA on IO 2-3.
-    ; We already sent $FE to IO 0 in .Start. The SPC music engine periodically checks
-    ; IO 0 for commands; when it sees $FE, total's command hook routes to the fast upload
-    ; handler at ARAM $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
+    ; We already sent $FE to IO 0 (from .Start directly, or from .StateStopWait after the
+    ; stop-wait countdown). The SPC music engine periodically checks IO 0 for commands;
+    ; when it sees $FE, total's command hook routes to the fast upload handler at ARAM
+    ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
     .StateInit:
         REP #$20
         LDA $2142 : CMP #$11AA : BNE .InitNotReady
