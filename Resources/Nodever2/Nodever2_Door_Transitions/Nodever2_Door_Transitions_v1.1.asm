@@ -1548,12 +1548,24 @@ if !VanillaCode == 0
         STA !RamAsyncSpcDataBank                ; save source bank
         LDA #$FF : STA $064C                    ; current music track = $FF (match $80:8F6D)
 
+        ; Mirror vanilla "stop track" queue side-effect: clear $07F5/$07F6 (current music track index).
+        ; Vanilla's $82:E071 path queues a track-0 entry, which the queue handler at $80:8F18-8F2A
+        ; processes by writing 0 to $07F5, $07F6, $2140 — i.e. it clears the SNES-side "current
+        ; track" tracking as well as sending the stop byte. We send $00 to $2140 directly (below)
+        ; without going through the queue, so we must replicate the $07F5 clear ourselves.
+        ; Without this, $82:E0D5 (called from our $82:E664 replacement after the upload finishes)
+        ; sees $07F5 == new room's $07C9 whenever the new room reuses the same track number as the
+        ; previous room (very common — most rooms use track 1) and returns early without queuing
+        ; the new track, leaving the room silent. Use 16-bit STZ so $07F5+$07F6 are both cleared,
+        ; matching vanilla's $80:8F21/$8F24 STA/STZ pair.
+        REP #$20                                ; 16-bit A for the dual STZ below (and for $05B8 read)
+        STZ $07F5                               ; current music track index = 0 (clears both $07F5 and $07F6)
+
         ; Stage 1: send "stop music" ($00) to IO 0 and arm the StopWait countdown.
         ; The SPC music engine's dispatch loop will see $00 on IO 0, interpret it as a music
         ; track index of 0, and kill the current song. We then wait !MusicStopWaitFrames frames
         ; (matching vanilla's $808FC1 timer) before sending $FE to request fast upload mode.
-        ; (STZ has no long form; we use LDA/STA long instead. DB = $8F here, so WRAM mirror
-        ; $0000-$1FFF is reachable — $05B8 is a plain absolute load.)
+        SEP #$20
         LDA #$00 : STA $002140                  ; IO 0 = $00 (stop music command)
         REP #$20                                ; 16-bit A for 16-bit NMI counter
         LDA $05B8                               ; current 16-bit NMI counter (WRAM mirror at DB=$8F)
