@@ -1157,12 +1157,6 @@ if !VanillaCode == 0
     org $8097A2 : LDY #$00A0 ; vertical
     org $809803 : LDY #$00A0 ; horizontal
 
-    ; Hijack vanilla ExecuteDoorTransitionVRAMUpdate to use our chunked version.
-    ; All callers JSR $9632, so JSL+RTS here works — RTL returns here, then RTS returns to the caller.
-    org $809632
-        JSL ChunkedVramTransfer
-        RTS
-
     org $809793
         JSR CheckIfVramUpdateNeeded_vertical_topOfScreen
 
@@ -1174,6 +1168,63 @@ if !VanillaCode == 0
 
     org $80980F
         JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
+
+    org !Freespace80
+    CheckIfVramUpdateNeeded: {
+        .vertical
+        ..topOfScreen
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL ++
+            JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
+        ++  RTS
+        ..bottomOfScreen
+            PHA ; need to preserve A here due to the routine we hijacked
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI ++
+            ; Door tube is high - execute VRAM update now if needed.
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  PLA
+            LDY #$0000 ; instruction replaced by hijack
+            RTS
+
+        .horizontal
+        ..topOfScreen
+            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
+            JSR ..compareYPosition : BMI ++
+            ; Door is low - move down if needed.
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
+            RTS
+        ..bottomOfScreen
+            ; This hijack replaces vanilla's unconditional JSR $9632 at $80:980F (IRQ command $1A).
+            ; Vanilla's command $1A is the ONLY place $05BC gets cleared in the horizontal IRQ cycle.
+            ; During early room loading (BEFORE the scroll wait at $82:E526), for UP doors
+            ; $82:E3FB sets the interrupt command to $16 (horizontal cycle) - only DOWN doors use
+            ; the vertical cycle during phase 1. $82:E49D only later switches UP doors to vertical.
+            ; So during phase 1, the $82:E06B wait loops at $E446/E450/E45A/E474/E488 rely on the
+            ; HORIZONTAL IRQ handlers to clear $05BC, even for UP doors.
+            ; If we skip on vertical direction, $05BC never clears → softlock at $82:E06B.
+            ; Fix: match vanilla behavior (unconditional $9632) for non-horizontal directions.
+            LDA !RamDoorDirection : BIT #$0002 : BNE +  ; If vertical transition: fall through to unconditional $9632 (match vanilla).
+            JSR ..compareYPosition : BPL ++             ; Else horizontal: only if door is high (else delay to next frame).
+        +   JSR $9632 ; Execute VRAM update now. (Caller already checked that $05BC bit 15 is set.)
+        ++  RTS
+
+        ..compareYPosition
+            LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
+            PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
+            RTS
+
+        .freespace
+    }
+    !Freespace80 := CheckIfVramUpdateNeeded_freespace
+    warnpc !Freespace80End
+
+    ; Hijack vanilla ExecuteDoorTransitionVRAMUpdate to use our chunked version.
+    ; All callers JSR $9632, so JSL+RTS here works — RTL returns here, then RTS returns to the caller.
+    org $809632
+        JSL ChunkedVramTransfer
+        RTS
 
     ; Chunked VRAM transfer: splits large DMA transfers across multiple frames.
     ;     This is done to eliminate risk of causing a lag frame due to IRQ running too long. IRQ running too long was causing the HUD to bug out for 1 frame.
@@ -1246,57 +1297,6 @@ if !VanillaCode == 0
     }
     !FreespaceAnywhere := ChunkedVramTransfer_freespace
     warnpc !FreespaceAnywhereEnd
-
-    org !Freespace80
-    CheckIfVramUpdateNeeded: {
-        .vertical
-        ..topOfScreen
-            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL ++
-            JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
-        ++  RTS
-        ..bottomOfScreen
-            PHA ; need to preserve A here due to the routine we hijacked
-            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI ++
-            ; Door tube is high - execute VRAM update now if needed.
-            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
-        ++  PLA
-            LDY #$0000 ; instruction replaced by hijack
-            RTS
-
-        .horizontal
-        ..topOfScreen
-            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
-            JSR ..compareYPosition : BMI ++
-            ; Door is low - move down if needed.
-            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
-        ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
-            RTS
-        ..bottomOfScreen
-            ; This hijack replaces vanilla's unconditional JSR $9632 at $80:980F (IRQ command $1A).
-            ; Vanilla's command $1A is the ONLY place $05BC gets cleared in the horizontal IRQ cycle.
-            ; During early room loading (BEFORE the scroll wait at $82:E526), for UP doors
-            ; $82:E3FB sets the interrupt command to $16 (horizontal cycle) - only DOWN doors use
-            ; the vertical cycle during phase 1. $82:E49D only later switches UP doors to vertical.
-            ; So during phase 1, the $82:E06B wait loops at $E446/E450/E45A/E474/E488 rely on the
-            ; HORIZONTAL IRQ handlers to clear $05BC, even for UP doors.
-            ; If we skip on vertical direction, $05BC never clears → softlock at $82:E06B.
-            ; Fix: match vanilla behavior (unconditional $9632) for non-horizontal directions.
-            LDA !RamDoorDirection : BIT #$0002 : BNE +  ; If vertical transition: fall through to unconditional $9632 (match vanilla).
-            JSR ..compareYPosition : BPL ++             ; Else horizontal: only if door is high (else delay to next frame).
-        +   JSR $9632 ; Execute VRAM update now. (Caller already checked that $05BC bit 15 is set.)
-        ++  RTS
-
-        ..compareYPosition
-            LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
-            PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
-            RTS
-
-        .freespace
-    }
-    !Freespace80 := CheckIfVramUpdateNeeded_freespace
-    warnpc !Freespace80End
 }
 
 ; ===============================================
