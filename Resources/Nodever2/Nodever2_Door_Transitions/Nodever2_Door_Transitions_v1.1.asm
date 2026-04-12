@@ -114,15 +114,11 @@ math pri on
                                      ;     Disable if you have conflicts, issues, or otherwise don't want the way the game loads music to be changed.
                                      ;     None of the other music-related options will take effect if this is 0.
 
-    !EarlyMusicUpload           = 0  ; EarlyMusicUpload: Start async SPC music upload as early as possible during door transitions, instead of waiting until the end.
-                                     ;     0: Vanilla timing - old music plays throughout scrolling.
-                                     ;     1: Start upload as soon as screen fades to black.
-
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
     !BlackTile = #$8081 ; This is the level data for 1 solid black tile in vanilla. The patch writes this in a few places where you can see OOB.
 
-    ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
+    ; Debug settings below - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
     !ScreenFadesOut             = 1       ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
     !VanillaCode                = 0       ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
     !VramChunkMax               = $0800   ; Maximum bytes to DMA per frame during door transition VRAM updates.
@@ -130,7 +126,10 @@ math pri on
                                           ;     This splits large transfers into chunks of !VramChunkMax bytes per frame.
                                           ;     At $0800 (2048 bytes), each chunk takes ~12 scanlines. A typical ~8KB transfer splits into ~4 frames.
                                           ;     Set to $FFFF to disable chunking (vanilla behavior).
-    !WaitForMusicUploadBeforeFadeIn = 0   ; Block the door transition fade-in until the async music upload has fully completed.
+    !EarlyMusicUpload               = 1   ; EarlyMusicUpload: Start async SPC music upload as early as possible during door transitions, instead of waiting until the end.
+                                          ;     0: Vanilla timing - old music plays throughout scrolling.
+                                          ;     1: Start upload as soon as screen fades to black.
+    !WaitForMusicUploadBeforeFadeIn = 1   ; Block the door transition fade-in until the async music upload has fully completed.
                                           ;     0: Fade in immediately after queue clears (may result in silent main gameplay until music loading completes).
                                           ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
     !MusicStopWaitFrames            = $08 ; Frames to wait between sending "stop music" ($00) and "start fast upload" ($FE) in EarlyStart.
@@ -592,7 +591,7 @@ if !VanillaCode == 0
 
     org !FreespaceAnywhere
     ; Put all variables that ScrollCamera uses on the stack, so we can reuse the code for X and Y.
-    ; Since all of this is being done in an interrupt, we don't want to use misc RAM because that could
+    ; Since all of this is being done in an interrupt, we don't want to use misc RAM where possible because that could
     ;  disrupt other code.
     ScrollCameraX: {
             LDA !RamLayer2XStartPos : PHA
@@ -690,6 +689,7 @@ if !VanillaCode == 0
             ; convert to a %
             ; the offset we need in the end (respecting order of operations):
             ;     layer 1 x pos = layer 1 x start pos + $01,s * (distance between start and end of transition) / 100h
+            ; yes, using the hardware registers is bad during the interrupt, but this is a vanilla problem already.
             ; 8x8 hardware multiply: (table_value * distance) >> 8
             ; A = distance (from TYA above), $01,s = table_value
             SEP #$20
@@ -1116,9 +1116,9 @@ if !VanillaCode == 0
     warnpc !FreespaceAnywhereEnd
 }
 
-; ==================================================================
-; ============== DOOR TRANSITION VRAM UPDATE POSITION ==============
-; ==================================================================
+; =========================================================
+; ============== DOOR TRANSITION VRAM UPDATE ==============
+; =========================================================
 {   ; This section is to address the black flickering during the door transition - position it so that it never overlaps the door tube, under any circumstances.
     ; When Samus collides with a door tile, find the top door tile of the door that has been collided with:
     org $9493A7
@@ -1175,20 +1175,24 @@ if !VanillaCode == 0
     org $80980F
         JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
 
-    ; Chunked VRAM transfer: splits large DMA transfers across multiple frames to reduce IRQ pressure.
+    ; Chunked VRAM transfer: splits large DMA transfers across multiple frames.
+    ;     This is done to eliminate risk of causing a lag frame due to IRQ running too long. IRQ running too long was causing the HUD to bug out for 1 frame.
+    ;     Without doing the VRAM transfers in smaller chunks, the IRQ was running too long in the rare scenario where a horizontal column of tiles was loaded due to scrolling,
+    ;     a vertical column of tiles was loaded, and the VRAM transfer all took place on the same frame.
     ; Called via JSL from $9632. All callers had 16-bit A (REP #$20) active.
     ; Updates !RamDoorVramUpdateSource, !RamDoorVramUpdateDestination, !RamDoorVramUpdateSize in-place after each chunk.
     ; Only clears the !RamDoorVramUpdateFlag pending flag after the last chunk completes.
     org !FreespaceAnywhere
     ChunkedVramTransfer: {
             ; A is 16-bit on entry
+
             ; Guard: skip if no transfer is pending (bit 15 of flag clear).
             ; The vanilla $9632 routine had this check internally. Two of the four callers
             ; (vertical_topOfScreen, horizontal_bottomOfScreen) rely on $9632 to check the flag
             ; rather than checking it themselves, so this guard must remain here.
             LDA !RamDoorVramUpdateFlag : BPL .noTransfer
 
-            LDA !RamDoorVramUpdateSize          ; remaining transfer size
+            LDA !RamDoorVramUpdateSize      ; remaining transfer size
             CMP #!VramChunkMax+1
             BCC .useRemaining               ; if remaining <= chunk max, transfer all of it
             LDA #!VramChunkMax              ; else cap at chunk max
@@ -1201,53 +1205,43 @@ if !VanillaCode == 0
     
             ; Configure DMA channel 1
             LDX !RamDoorVramUpdateDestination : STX $2116 ; VRAM destination
-            LDX #$1801 : STX $4310                    ; DMA control: 16-bit VRAM write (register $2118, mode 1)
+            LDX #$1801 : STX $4310                        ; DMA control: 16-bit VRAM write (register $2118, mode 1)
             LDX !RamDoorVramUpdateSource : STX $4312      ; DMA source address
             LDA !RamDoorVramUpdateSourceBank : STA $4314  ; DMA source bank
-            LDA #$80 : STA $2115                      ; VRAM address increment mode (increment after high byte write)
+            LDA #$80 : STA $2115                          ; VRAM address increment mode (increment after high byte write)
             REP #$20
-            LDA $01,s : STA $4315                     ; DMA size = this_chunk_size from stack
+            LDA $01,s : STA $4315                         ; DMA size = this_chunk_size from stack
             SEP #$20
-            LDA #$02 : STA $420B                      ; Execute DMA on channel 1
+            LDA #$02 : STA $420B                          ; Execute DMA on channel 1
     
             ; Update source, dest, remaining in-place for next chunk
             REP #$20
     
             ; source address += this_chunk_size
             LDA $01,s
-            CLC : ADC !RamDoorVramUpdateSource
-            STA !RamDoorVramUpdateSource
+            CLC : ADC !RamDoorVramUpdateSource : STA !RamDoorVramUpdateSource
     
             ; VRAM dest += this_chunk_size / 2 (VRAM addresses are in words, DMA size is in bytes)
-            LDA $01,s
-            LSR A
-            CLC : ADC !RamDoorVramUpdateDestination
-            STA !RamDoorVramUpdateDestination
+            LDA $01,s : LSR A
+            CLC : ADC !RamDoorVramUpdateDestination : STA !RamDoorVramUpdateDestination
     
             ; remaining -= this_chunk_size
             LDA !RamDoorVramUpdateSize
-            SEC : SBC $01,s
-            STA !RamDoorVramUpdateSize
+            SEC : SBC $01,s : STA !RamDoorVramUpdateSize
     
-            PLA                             ; clean this_chunk_size off stack
+            PLA ; clean this_chunk_size off stack
     
-            ; If remaining == 0, transfer is complete
-            LDA !RamDoorVramUpdateSize
-            BNE .moreRemaining
-
-            ; Transfer complete: clear the pending flag so Bank $82 polling loop can continue
-            LDA #$8000 : TRB !RamDoorVramUpdateFlag
+            LDA !RamDoorVramUpdateSize : BNE .moreRemaining ; If remaining == 0, transfer is complete
+            LDA #$8000 : TRB !RamDoorVramUpdateFlag         ; Transfer complete: clear the pending flag so Bank $82 polling loop can continue
 
         .moreRemaining:
             ; If more data remains, flag stays set.
             ; Next frame's IRQ will call $9632 again, which JSLs here for the next chunk.
-
             SEP #$20
             LDA #$0F : STA $2100            ; restore screen brightness (disable forced blank)
         .noTransfer:
             REP #$20                        ; match original routine's exit state (16-bit A)
-            RTL
-    
+            RTL    
             .freespace
     }
     !FreespaceAnywhere := ChunkedVramTransfer_freespace
@@ -1280,7 +1274,7 @@ if !VanillaCode == 0
         ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
             RTS
         ..bottomOfScreen
-            ; This hijack replaces vanilla's unconditional `JSR $9632` at $80:980F (IRQ command $1A).
+            ; This hijack replaces vanilla's unconditional JSR $9632 at $80:980F (IRQ command $1A).
             ; Vanilla's command $1A is the ONLY place $05BC gets cleared in the horizontal IRQ cycle.
             ; During early room loading (BEFORE the scroll wait at $82:E526), for UP doors
             ; $82:E3FB sets the interrupt command to $16 (horizontal cycle) - only DOWN doors use
