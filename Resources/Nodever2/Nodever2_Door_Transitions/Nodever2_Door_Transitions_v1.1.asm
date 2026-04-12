@@ -1626,6 +1626,29 @@ if !VanillaCode == 0
     ; We force 16-bit X/Y before push/pop to ensure stack balance regardless of caller state.
     .Dispatch:
         LDA !RamAsyncSpcState : BEQ .DispatchIdle
+
+        ; Game-state guard: only dispatch during game states where our upload can legitimately
+        ; be active. NmiWaitPump ($80:8343 hijack) runs during ALL game states because $80:8338
+        ; is the universal "wait for NMI" routine. But our upload is only started during door
+        ; transitions ($09-$0B) and must complete before reaching main gameplay ($07-$08).
+        ; Outside this range — pause ($0C-$12), death ($13-$1A), ending ($27), etc. — our RAM
+        ; may be repurposed (e.g., $7F:F800-FFFF is the ending blank tilemap) and reading
+        ; !RamAsyncSpcState would return garbage, crashing the game via the jump table.
+        ; Mirrors the PreUploadHook's game state check at .PuhVanilla.
+        LDA !RamGameState
+        CMP #$0007 : BCC .DispatchIdle          ; < $07: title/intro states — skip
+        CMP #$000C : BCC .DispatchOk            ; $07-$0B: gameplay + door transition — proceed
+        ; >= $0C: pause, death, ending, etc. — skip
+    .DispatchIdle:
+        RTS
+
+    .DispatchOk:
+        ; Bounds check: if state > max valid entry, RAM has been corrupted by external code.
+        ; Force-recover to idle so a corrupt state can never index past the jump table.
+        LDA !RamAsyncSpcState
+        CMP #!AsyncSpcStateStopWait+2           ; compare against first INVALID state index
+        BCS .DispatchCorrupt
+
         REP #$30                                ; force 16-bit A AND X/Y before push (critical for stack balance!)
         PHX : PHY : PHB
         PHK : PLB                               ; DB = code bank (for jump table)
@@ -1633,7 +1656,14 @@ if !VanillaCode == 0
         JSR (.JumpTable,x)
         REP #$10                                ; ensure 16-bit X/Y for pop (state handlers may have changed it)
         PLB : PLY : PLX
-    .DispatchIdle:
+        RTS
+
+    .DispatchCorrupt:
+        ; State is outside valid range — external write stomped our RAM.
+        ; Force everything back to idle. Upload is lost but the game stays alive.
+        LDA #$0000
+        STA !RamAsyncSpcState                   ; state = idle
+        STA $0617                               ; clear upload flag (unblock music queue + sound handler)
         RTS
 
     .JumpTable:
