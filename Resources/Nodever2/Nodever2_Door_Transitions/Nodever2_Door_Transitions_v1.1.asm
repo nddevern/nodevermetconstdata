@@ -195,6 +195,7 @@ math pri on
     ;    3: Up
     ;    +4: Close a door on next screen
     ;}
+    !RamDoorScrollingFinishedFlag     = $0931
     !RamDoorVramUpdateFlag            = $05BC ; 16-bit. Bit 15 = VRAM transfer pending.
     !RamDoorVramUpdateDestination     = $05BE ; 16-bit. VRAM destination address (in words).
     !RamDoorVramUpdateSource          = $05C0 ; 16-bit. DMA source address (low 16 bits).
@@ -202,6 +203,7 @@ math pri on
     !RamDoorVramUpdateSize            = $05C3 ; 16-bit. DMA transfer size (in bytes).
     !RamUploadingToApuFlag            = $0617
     !RamMusicTimer                    = $063F
+    !RamNmiRequestFlag                = $05B4 ; 8-bit.
 
     ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
     !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
@@ -218,8 +220,6 @@ math pri on
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-
-    ; Async SPC upload state machine variables
     !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Function pointer (0=idle, else state handler address)
     !RamAsyncSpcDataY                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source pointer (Y register into bank)
     !RamAsyncSpcDataBank                         := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source bank (low byte used, stored as word for convenience)
@@ -1195,7 +1195,7 @@ if !VanillaCode == 0
             JSR ..compareYPosition : BMI ++
             ; Door is low - move down if needed.
             LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
-        ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
+        ++  LDA !RamDoorScrollingFinishedFlag ; instruction replaced by hijack
             RTS
         ..bottomOfScreen
             ; This hijack replaces vanilla's unconditional JSR $9632 at $80:980F (IRQ command $1A).
@@ -1323,31 +1323,18 @@ if !AsyncMusicUploadEnabled > 0
     ;     Else: Match vanilla behavior, call 808F7E which will not return until the music upload completes.
     ; Does not hijack the line of code at $808F7E because total's patch already does.
     org $808F72
-        JSL AsyncSpcUpload_PreUploadHook
+        JSL AsyncSpcUpload_InitializeUpload
 
-    ; Hijack the scroll wait loop at $82:E526 to pump SPC bytes while idle.
-    ; Vanilla: LDA $0931 / BPL $FB (tight 2-instruction loop, ~44 frames).
-    ; We replace with JSL to our pump wrapper, which pumps bytes then checks $0931.
+    ; During door transition scrolling, transfer music data to SPC while the main thread waits for scrolling to complete.
     org $82E526
-        JSL AsyncSpcUpload_ScrollWaitPump
-        NOP                                     ; pad (original was 5 bytes: LDA $0931 + BPL $FB)
+        NOP : JSL AsyncSpcUpload_ScrollWaitTransfer
 
-    ; Hijack the NMI-wait loop at $80:8343 to pump SPC bytes while idle.
-    ; Vanilla: LDA $05B4 / BNE $FB (tight 2-instruction loop).
-    ; We replace with JSL to our pump wrapper, which pumps bytes then checks $05B4.
+    ; While waiting for NMI, transfer music data to SPC.
     org $808343
-        JSL AsyncSpcUpload_NmiWaitPump
-        NOP                                     ; pad (original was 5 bytes: LDA $05B4 + BNE $FB)
+        NOP : JSL AsyncSpcUpload_NmiWaitTransfer
 
-    ; Guard the sound handler call in the main game loop ($82:896E).
-    ; Vanilla: JSL $8289EF (handle sounds - 4 bytes, exact replacement).
-    ; The sound handler's BRANCH_DOWNTIME path ($82:8A0B) writes STZ $2141 / STZ $2142 / STZ $2143
-    ; every frame while sound downtime > 0 (set to 8 at $80:8F9B right after our async upload starts).
-    ; These zero IO 1-3, corrupting block headers (dest addr in IO 2-3, eof flag in IO 1)
-    ; before the SPC can read them. The SPC reads eof=0 as EOF and exits the upload prematurely.
-    ; Additionally, sound states 0-4 write to $2141+x for sound effect communication,
-    ; which would also corrupt the protocol if downtime expires before the upload finishes.
-    ; Fix: skip the entire sound handler when !RamUploadingToApuFlag is set.
+    ; Prevent the sound handler from running via main game loop during an async SPC transfer,
+    ;     as this would clobber registers to transfer data to the SPC.
     org $82896E
         JSL AsyncSpcUpload_SoundHandlerGuard
 
@@ -1367,8 +1354,8 @@ if !AsyncMusicUploadEnabled > 0
         ; Wait for async music upload to complete before advancing past $82:E664.
         ; Vanilla $82:E664: calls $808EF4 (is music queued?), and if not, advances door transition
         ; function to $82:E6A2 and calls $82:E0D5 (load new music track). But our async upload path
-        ; clears the music queue entry IMMEDIATELY (via the PreUploadHook's skip to $8F82), so
-        ; $808EF4 returns "queue empty" even while the upload is still pumping bytes. The transition
+        ; clears the music queue entry IMMEDIATELY (via the InitializeUpload's skip to $8F82), so
+        ; $808EF4 returns "queue empty" even while the upload is still transfering bytes. The transition
         ; then advances to $E6A2 → $E737 → main gameplay (game state 8) with silent audio until the
         ; upload finally completes, after which queued SFX all fire at once.
         ;
@@ -1395,7 +1382,7 @@ if !AsyncMusicUploadEnabled > 0
     ; ============ Async SPC Music Upload ============
     ; Replaces the vanilla blocking SPC upload ($80:8024) with a multi-frame state machine.
     ; Instead of uploading all music data inside a single call (5-20 frames of blocking),
-    ; this breaks the upload into small chunks pumped during idle busy-wait loops.
+    ; this breaks the upload into small chunks transfered during idle busy-wait loops.
     ;
     ; Uses total's fast $FE SPC upload protocol (total SPC transfer optimisation.asm):
     ;   CPU sends $FE to IO 0 → SPC responds with $11AA on IO 2-3.
@@ -1421,11 +1408,11 @@ if !AsyncMusicUploadEnabled > 0
     ;   2  = Init (send $FE, wait for $11AA)
     ;   4  = NextBlock (wait $11AA, read header, send dest + $00BB)
     ;   6  = BlockWait (wait for $11CC)
-    ;   8  = Transfer (pump 2-byte pairs, up to 64 bytes per call)
+    ;   8  = Transfer (transfer 2-byte pairs, up to 64 bytes per call)
     ;   10 = EofWait (wait for $11CC after EOF)
     ;   12 = Complete (clear flags, go idle)
 
-    !AsyncSpcBytesPerPump = $0040               ; 64 bytes per pump call
+    !AsyncSpcBytesPerTransfer = $0040               ; 64 bytes per transfer call
 
     !AsyncSpcStateIdle      = $0000
     !AsyncSpcStateInit      = $0002
@@ -1439,7 +1426,8 @@ if !AsyncMusicUploadEnabled > 0
     org !FreespaceAnywhere
     AsyncSpcUpload: {
 
-        .PreUploadHook:
+        .InitializeUpload:
+            ; X = music data index
             LDA MusicPointers,x ; Instruction replaced by hijack
             PHA
 
@@ -1452,45 +1440,26 @@ if !AsyncMusicUploadEnabled > 0
 
             ; --- Door transition: start async upload ---
 
-            ; Execute the instructions we're skipping over ($8F76-$8F7D):
-            STA $00                                 ; $8F76: STA $00
-            LDA MusicPointers+1,x                   ; $8F78: LDA MusicPointers+1,x
-            STA $01                                 ; $8F7C: STA $01
-            ; DP $00-$02 now has the source pointer, same as vanilla reaching $8F7E.
+            STA $00               ;\
+            LDA MusicPointers+1,x ;) $00 = [MusicDataPointers + [music data index]]
+            STA $01               ;/
 
             ; Start async state machine
             PHP
             REP #$30
-            LDA $00 : STA !RamAsyncSpcDataY         ; save source pointer Y
+            LDA $00    : STA !RamAsyncSpcDataY      ; save source pointer Y
+            LDA #$FFFF : STA !RamUploadingToApuFlag ; Set uploading flag (prevents music queue handler and sound handler from touching APU ports)
             SEP #$20
-            LDA $02 : STA !RamAsyncSpcDataBank      ; save source bank
-
-            ; Set uploading flag (prevents music queue handler and sound handler from touching APU ports)
+            LDA $02  : STA !RamAsyncSpcDataBank     ; save source bank
+            LDA #$FE : STA $002140                  ; Send $FE to APU IO 0 to request fast upload mode (total's protocol)
+            LDA #$81 : STA $01,s                    ; Skip call to vanilla APU upload by updating stack retrun address; return to $808F82
             REP #$20
-            LDA #$FFFF : STA !RamUploadingToApuFlag
-
-            ; Send $FE to APU IO 0 to request fast upload mode (total's protocol)
-            SEP #$20
-            LDA #$FE : STA $002140                  ; long addr: DB may not be bank $00/$80
-
-            ; Set initial state: wait for SPC to respond with $11AA on IO 2-3
-            REP #$20
-            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
-            PLP
-
-            ; Skip $8F76-$8F7E by adjusting the return address on the stack.
-            ; JSL at $8F72 pushed return addr $8F75 (RTL goes to $8F76).
-            ; We want RTL to go to $8F82 instead → set return addr to $8F81 (RTL adds 1).
-            ; Stack: S+1=PCL($75), S+2=PCH($8F), S+3=PBR($80)
-            SEP #$20
-            LDA #$81 : STA $01,s                   ; PCL = $81 → RTL returns to $8F82
+            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState ; Set initial state: wait for SPC to respond with $11AA on IO 2-3. NMI checks this, so do this last.
+            PLP            
             RTL
 
         ..VanillaApuUpload:
-            ; Not a door transition (or async already active).
-            ; Restore A (the LDA MusicPointers,x result) and return to $8F76.
-            ; Normal flow continues: STA $00, LDA, STA $01, then $8F7E (total's upload).
-            PLA : RTL
+            PLA : RTL ; Not a door transition (or async already active).
 
         ; ---- Early start hook: hijack entry point for $82:E37F ----
         ; Vanilla $82:E37F is JSL $8882C1 (Initialise special effects for new room). Our hijack
@@ -1525,7 +1494,7 @@ if !AsyncMusicUploadEnabled > 0
         ;
         ; We match vanilla timing: write $00 to IO 0 here, capture $05B8 + !MusicStopWaitFrames as
         ; the target frame, and transition to .StateStopWait. StateStopWait polls $05B8 from the
-        ; pump loop and, once the target is reached, writes $FE and transitions to .StateInit.
+        ; transfer loop and, once the target is reached, writes $FE and transitions to .StateInit.
         ;
         ; Preconditions on entry:
         ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
@@ -1611,75 +1580,50 @@ if !AsyncMusicUploadEnabled > 0
             PLP
             RTL
 
-        ; ---- Pump wrapper for scroll wait loop ($82:E526 hijack) ----
-        ; Vanilla: LDA $0931 / BPL $FB (tight busy loop)
-        ; We replace the entire loop: pump SPC bytes, check $0931, repeat internally until done.
-        ; The loop lives HERE so we never re-enter the JSL and never leak stack frames.
-        .ScrollWaitPump:
-            PHP
-        .ScrollWaitLoop:
-            REP #$20
+        .ScrollWaitTransfer:
+            PHP : REP #$20
+        ..Loop:
             JSR .Dispatch
-            REP #$20                                ; ensure 16-bit A after Dispatch (state handlers may leave M=1)
-            LDA $0931                               ; 16-bit load - vanilla checks bit 15 ($8000 = done)
-            BPL .ScrollWaitLoop                     ; tight poll until bit 15 set (same as vanilla BPL $FB)
-            PLP
-            RTL                                     ; return to $82:E52B (after the hijacked 5 bytes)
+            REP #$20
+            LDA !RamDoorScrollingFinishedFlag : BPL ..Loop ; negative = done scrolling, stop transferring.
+            PLP : RTL
 
-        ; ---- Pump wrapper for NMI-wait loop ($80:8343 hijack) ----
-        ; Vanilla: LDA $05B4 / BNE $FB (tight busy loop)
-        ; Same fix: loop internally so we never re-enter the JSL.
-        .NmiWaitPump:
+        .NmiWaitTransfer:
             PHP
-        .NmiWaitLoop:
+        ..Loop:
             REP #$20
             JSR .Dispatch
             SEP #$20
-            LDA $05B4                               ; check NMI request flag
-            BNE .NmiWaitLoop                        ; tight poll - no WAI (same race condition risk)
-            PLP
-            RTL                                     ; return to $80:8348 (after the hijacked 5 bytes)
+            LDA !RamNmiRequestFlag : BNE ..Loop
+            PLP : RTL
 
         ; ---- Dispatch: call current state handler if active ----
         ; Called via JSR with 16-bit A. X/Y size may vary (8-bit from NMI-wait, 16-bit from scroll-wait).
-        ; We force 16-bit X/Y before push/pop to ensure stack balance regardless of caller state.
+        ; We force 16-bit X/Y before push/pull to ensure stack balance regardless of caller state.
         .Dispatch:
-            LDA !RamAsyncSpcState : BEQ .DispatchIdle
+            LDA !RamAsyncSpcState : BEQ ..Idle
 
-            ; Game-state guard: only dispatch during game states where our upload can legitimately
-            ; be active. NmiWaitPump ($80:8343 hijack) runs during ALL game states because $80:8338
-            ; is the universal "wait for NMI" routine. But our upload is only started during door
-            ; transitions ($09-$0B) and must complete before reaching main gameplay ($07-$08).
-            ; Outside this range - pause ($0C-$12), death ($13-$1A), ending ($27), etc. - our RAM
-            ; may be repurposed (e.g., $7F:F800-FFFF is the ending blank tilemap) and reading
-            ; !RamAsyncSpcState would return garbage, crashing the game via the jump table.
-            ; Mirrors the PreUploadHook's game state check at ..VanillaApuUpload.
+            ; Check gamestate. Similar to InitializeUpload's game state check.
             LDA !RamGameState
-            CMP #$0007 : BCC .DispatchIdle          ; < $07: title/intro states - skip
-            CMP #$000C : BCC .DispatchOk            ; $07-$0B: gameplay + door transition - proceed
-            ; >= $0C: pause, death, ending, etc. - skip
-        .DispatchIdle:
+            CMP #$0007 : BCC ..Idle          ; < $07: title/intro states - skip
+            CMP #$000C : BCC ..Ok            ; $07-$0B: gameplay + door transition - proceed
+        ..Idle:                              ; >= $0C: pause, death, ending, etc. - skip
             RTS
 
-        .DispatchOk:
-            ; Bounds check: if state > max valid entry, RAM has been corrupted by external code.
-            ; Force-recover to idle so a corrupt state can never index past the jump table.
-            LDA !RamAsyncSpcState
-            CMP #!AsyncSpcStateStopWait+2           ; compare against first INVALID state index
-            BCS .DispatchCorrupt
+        ..Ok:
+            LDA !RamAsyncSpcState : CMP #!AsyncSpcStateStopWait+2 : BCS ..Corrupt ; Sanity check: if state > max valid entry, handle it with ..Corrupt
 
-            REP #$30                                ; force 16-bit A AND X/Y before push (critical for stack balance!)
+            REP #$30                                ; force 16-bit A AND X/Y before push (critical for stack balance)
             PHX : PHY : PHB
             PHK : PLB                               ; DB = code bank (for jump table)
             TAX                                     ; X = state number (16-bit, pre-multiplied by 2)
             JSR (.JumpTable,x)
-            REP #$10                                ; ensure 16-bit X/Y for pop (state handlers may have changed it)
+            REP #$10                                ; ensure 16-bit X/Y for pull (state handlers may have changed it)
             PLB : PLY : PLX
             RTS
 
-        .DispatchCorrupt:
-            ; State is outside valid range - external write stomped our RAM.
-            ; Force everything back to idle. Upload is lost but the game stays alive.
+        ..Corrupt:
+            ; State is outside valid range. Force everything back to idle. This should never happen.
             LDA #$0000
             STA !RamAsyncSpcState                   ; state = idle
             STA !RamUploadingToApuFlag              ; clear upload flag (unblock music queue + sound handler)
@@ -1706,10 +1650,10 @@ if !AsyncMusicUploadEnabled > 0
         ;
         ; Frame counter: $05B8 is the 16-bit NMI counter (incremented every NMI in BRANCH_RETURN
         ; at $80:95F9, including via the BRANCH_LAG fall-through). We deliberately do NOT use
-        ; $05B5 - during door transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0
+        ; $05B5 - during door transitions an erroneous 16-bit write to !RamNmiRequestFlag clobbers $05B5 to 0
         ; every frame, so a wait against $05B5 can never be satisfied. $05B8 is the only frame-
-        ; like counter that advances reliably across door transitions. The state machine pump is
-        ; called many times per frame from .ScrollWaitPump / .NmiWaitPump loops, so we just poll
+        ; like counter that advances reliably across door transitions. The state machine transfer is
+        ; called many times per frame from .ScrollWaitTransfer / .NmiWaitTransfer loops, so we just poll
         ; $05B8 each dispatch.
         ;
         ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
@@ -1843,7 +1787,7 @@ if !AsyncMusicUploadEnabled > 0
             RTS
 
         ; ---- State: Transfer ----
-        ; Pump up to !AsyncSpcBytesPerPump bytes per call using total's 2-byte pair protocol.
+        ; Transfer up to !AsyncSpcBytesPerTransfer bytes per call using total's 2-byte pair protocol.
         ;
         ; Protocol per pair:
         ;   - Send 2 data bytes to IO 0-1 (16-bit write)
@@ -1856,9 +1800,9 @@ if !AsyncMusicUploadEnabled > 0
         ; End-of-block: instead of sending next counter, send (counter-1) to IO 2 and $01 to IO 3.
         ; SPC sees bit 0 of $F7 ($2143) set → exits transfer, re-enters fastspc for next block.
         ;
-        ; Register usage during pump loop:
+        ; Register usage during transfer loop:
         ;   A (8-bit) = handshake counter (next value to send)
-        ;   X (16-bit) = bytes remaining in pump budget (counts down by 2)
+        ;   X (16-bit) = bytes remaining in transfer budget (counts down by 2)
         ;   Y (16-bit) = source data pointer (into current bank via DB)
         ;
         ; NOTE: DP $00 is NOT used - NMI can fire mid-loop and clobber DP scratch.
@@ -1872,9 +1816,9 @@ if !AsyncMusicUploadEnabled > 0
             SEP #$20
             LDA !RamAsyncSpcIndex                   ; A = counter (8-bit)
             REP #$10                                ; ensure 16-bit X/Y
-            LDX #!AsyncSpcBytesPerPump              ; X = pump budget in bytes
+            LDX #!AsyncSpcBytesPerTransfer              ; X = transfer budget in bytes
 
-            CMP #$00 : BNE .TxPumpLoop             ; counter > 0 → mid-block, resume pumping
+            CMP #$00 : BNE .TxTransferLoop             ; counter > 0 → mid-block, resume transfering
 
             ; --- First pair of block ---
             ; Wait for $11CC (SPC ready for data after acknowledging block header).
@@ -1889,13 +1833,13 @@ if !AsyncMusicUploadEnabled > 0
             LDA #$0000 : STA $002142                ; long addr (no STZ long opcode exists)
             SEP #$20
             LDA #$01                                ; counter becomes 1 (next to send)
-            ; Y is NOT advanced here - .TxPumpLoop does INY INY at the start
+            ; Y is NOT advanced here - .TxTransferLoop does INY INY at the start
             ; to advance past the previous pair before loading the next one
             DEX : DEX                               ; budget -= 2
             BEQ .TxChunkDone
-            ; Fall through to pump subsequent pairs
+            ; Fall through to transfer subsequent pairs
 
-        .TxPumpLoop:
+        .TxTransferLoop:
             ; A = counter (8-bit), X = budget (16-bit), Y = source (16-bit)
             ; Advance Y past previous pair's data
             INY : BNE +
@@ -1933,11 +1877,11 @@ if !AsyncMusicUploadEnabled > 0
             CLC : ADC #$02
 
             DEX : DEX                               ; budget -= 2
-            BNE .TxPumpLoop
+            BNE .TxTransferLoop
             ; Fall through when budget exhausted
 
         .TxChunkDone:
-            ; Save state for next pump call
+            ; Save state for next transfer call
             STA !RamAsyncSpcIndex                   ; save counter
             REP #$20
             TYA : STA !RamAsyncSpcDataY             ; save source pointer
@@ -2023,27 +1967,19 @@ if !AsyncMusicUploadEnabled > 0
             LDY #$8000
             RTS
 
-        ; ---- Guard: sound handler call ($82:896E hijack) ----
-        ; Called via JSL from $82:896E (replaces JSL $8289EF in the main game loop).
-        ; The sound handler writes to APU IO ports $2141-$2143 in multiple paths:
-        ;   - BRANCH_DOWNTIME: STZ $2141 / STZ $2142 / STZ $2143 (every frame during downtime)
-        ;   - Sound states 0-4: STA $2141,x (queued sound effect commands)
-        ; During async SPC upload, ANY write to IO 1-3 corrupts the transfer protocol.
-        ; When !RamUploadingToApuFlag != 0 (upload active), skip the sound handler entirely.
+        ; When !RamUploadingToApuFlag != 0 (async upload active), skip the sound handler entirely.
         ; When !RamUploadingToApuFlag == 0, call the original sound handler normally.
         .SoundHandlerGuard:
-            PHP
-            REP #$20
-            LDA !RamUploadingToApuFlag : BNE .ShgSkip
+            PHP : REP #$20
+            LDA !RamUploadingToApuFlag : BNE ..SkipSoundHandler
             PLP
-            JSL $8289EF                             ; call original sound handler
+            JSL $8289EF                             ; call sound handler
             RTL
-        .ShgSkip:
+        ..SkipSoundHandler:
             PLP
             RTL                                     ; skip sound handler - return to $82:8972
 
-        ; ---- Guard: music queue handler ($808F0C hijack) ----
-        ; If !RamUploadingToApuFlag != 0 (async upload active), skip the ENTIRE music queue handler.
+        ; If !RamUploadingToApuFlag != 0 (async upload active), skip the music queue handler.
         ; If !RamUploadingToApuFlag == 0, execute the overwritten instructions and return to $8F12.
         .MusicQueueGuard:
             REP #$20                                ; code replaced by hijack
