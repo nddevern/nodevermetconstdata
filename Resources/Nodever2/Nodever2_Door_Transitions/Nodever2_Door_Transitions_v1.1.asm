@@ -1,5 +1,7 @@
 lorom
 
+; BY DEFAULT, THIS PATCH REQUIERS TOTAL'S SPC TRANSFER OPTIMIZATION!!! READ MORE BELOW. https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
+
 warnings disable Wfeature_deprecated
 
 math round off
@@ -24,7 +26,7 @@ math pri on
 ;     > This makes large rooms load faster.
 ;
 ;  * SPC Transfer Optimization by total - https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
-;     > This makes music load faster.
+;     > THIS IS REQUIRED BY DEFAULT!!! This makes music load faster. See !AsyncMusicUploadEnabled option if you don't want to use this.
 ;
 ;  * Full Door Cap PLM Rewrite by Nodever2 - https://metroidconstruction.com/resource.php?id=562
 ;     > This makes door caps a lot less annoying, you can't bonk on them as they're opening anymore alongside other improvements.
@@ -45,6 +47,9 @@ math pri on
 ;      > Escape timer flickers during horizontal door transitions
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 ; 2026-04-04 v1.1:
+;   * VRAM transfers now occur over a longer period of time, resulting in a shorter fblank period each frame. This occurs during scrolling and does not slow down the total length of the transition.
+;   * SPC music data transfers now start as soon as the screen fades to black and happen in the background throughout the rest of the transition, instead of happening all at once after scrolling stops.
+;     This greatley reduces if not eliminates the hang time at the end of a door transition where there is a music transition.
 ;   * Added many options:
 ;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
 ;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes. This replaces the option TransitionAnimation - this is just a more customizable version.
@@ -72,87 +77,71 @@ math pri on
     !RamBank                  = $7F0000
     !RamStart                #= $FC02+!RamBank ; $FB02-$FC01 is used by Amoeba's Custom Scrolling Sky patch; $FE00-$FFFF is used by saveload patch
 
-    !ScreenFadeDelay          = #$0004 ; ScreenFadeDelay: Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
+    !ScreenFadeDelay        = #$0004 ; ScreenFadeDelay: Controls how fast the screen fades to/from black. Higher = slower. Vanilla: #$000C
 
-    !PrimaryScrollDuration    = $002C  ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically).
-                                       ;     > If you make this too low, you may get graphical glitches, and this patch will scream at you while it's assembling when it thinks that this is possible.
-                                       ;         (I came up with the threshold that makes the patch scream at you through testing on my own, may not be 100% accurate - make this value low at your own risk).
-                                       ;         (The threshold also depends on which ScrollCurve you use).
-                                       ;     > We generate lookup tables ScrollDuration entries long, so the larger the duration(s), the more freespace used.
-                                       ;     > You can change primary/secondary scroll duration independently to make the screen take different "paths".
+    !PrimaryScrollDuration  = $002C  ; ScrollDuration: How long the door transition screen scrolling will take, in frames. Vanilla: 0040h (basically).
+                                     ;     > If you make this too low, you may get graphical glitches, and this patch will scream at you while it's assembling when it thinks that this is possible.
+                                     ;         (I came up with the threshold that makes the patch scream at you through testing on my own, may not be 100% accurate - make this value low at your own risk).
+                                     ;         (The threshold also depends on which ScrollCurve you use).
+                                     ;     > We generate lookup tables ScrollDuration entries long, so the larger the duration(s), the more freespace used.
+                                     ;     > You can change primary/secondary scroll duration independently to make the screen take different "paths".
     !SecondaryScrollDuration #= !PrimaryScrollDuration*1/2
 
-    !TwoPhaseTransition       = 0      ; TwoPhaseTransition: Determines whether primray and secondary scrolling occur sequentially (vanilla) or simultaneously.
-                                       ;     0: Primary and seconary scrolling occur simultaneously.
-                                       ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
-                                       ;     2: Primary scrolling first, then secondary scrolling.
+    !TwoPhaseTransition         = 0  ; TwoPhaseTransition: Determines whether primray and secondary scrolling occur sequentially (vanilla) or simultaneously.
+                                     ;     0: Primary and seconary scrolling occur simultaneously.
+                                     ;     1: Secondary scrolling first, then primary scrolling (like vanilla).
+                                     ;     2: Primary scrolling first, then secondary scrolling.
 
-    !PrimaryScrollCurve       = 1      ; ScrollCurve: Determines how the screen accelerates/decelerates during primary scrolling.
-    !SecondaryScrollCurve     = 4      ;     1: quadratic ease in ease out.
-                                       ;     2: ease out.
-                                       ;     3: ease in.
-                                       ;     4: bezier ease in ease out.
-                                       ;     5: linear, like vanilla.
+    !PrimaryScrollCurve         = 1  ; ScrollCurve: Determines how the screen accelerates/decelerates during primary scrolling.
+    !SecondaryScrollCurve       = 4  ;     1: quadratic ease in ease out.
+                                     ;     2: ease out.
+                                     ;     3: ease in.
+                                     ;     4: bezier ease in ease out.
+                                     ;     5: linear, like vanilla.
 
-    !PlaceSamusAlgorithm      = 1      ; PlaceSamusAlgorithm: Determines which algorithm is used to place Samus after a door transition:
-                                       ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
-                                       ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
-                                       ;     3: The door distance to spawn value is a hardcoded pixel offset from the edge of the screen.
-                                       ;     4: Advanced mode - Uses extra !FreespaceAnywhere. Different values in the door distance to spawn have different behavior:
-                                       ;        0000-8000: Vanilla behavior, i.e. algorithm 1.
-                                       ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
-                                       ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
+    !PlaceSamusAlgorithm        = 1  ; PlaceSamusAlgorithm: Determines which algorithm is used to place Samus after a door transition:
+                                     ;     1: Vanilla. Like vanilla, default values are used if a negative distance to door is given.
+                                     ;     2: The algorithm that was originally included in this patch. Places Samus at the door cap if it exists, otherwise uses default values. Ignores door distance to spawn value.
+                                     ;     3: The door distance to spawn value is a hardcoded pixel offset from the edge of the screen.
+                                     ;     4: Advanced mode - Uses extra !FreespaceAnywhere. Different values in the door distance to spawn have different behavior:
+                                     ;        0000-8000: Vanilla behavior, i.e. algorithm 1.
+                                     ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
+                                     ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
     
-    !ReportFreespaceAndRamUsage = 1    ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
+    !AsyncMusicUploadEnabled    = 1  ; AsyncMusicUploadEnabled: If 0, none of the new music upload code changes will be assembled by this patch.
+                                     ;     IF ENABLED, TOTAL'S SPC TRANSFER OPTIMIZATION PATCH IS REQUIRED TO ALSO HAVE INSTALLED IN YOUR HACK!!!
+                                     ;     GET IT HERE: https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
+                                     ;     Disable if you have conflicts, issues, or otherwise don't want the way the game loads music to be changed.
+                                     ;     None of the other music-related options will take effect if this is 0.
+
+    !EarlyMusicUpload           = 0  ; EarlyMusicUpload: Start async SPC music upload as early as possible during door transitions, instead of waiting until the end.
+                                     ;     0: Vanilla timing - old music plays throughout scrolling.
+                                     ;     1: Start upload as soon as screen fades to black.
+
+    !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
     !BlackTile = #$8081 ; This is the level data for 1 solid black tile in vanilla. The patch writes this in a few places where you can see OOB.
 
     ; Debug constants - These probably shouldn't be changed from their default state in the release version of your hack, but feel free to play with them.
-    !ScreenFadesOut             = 1    ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
-    !VanillaCode                = 0    ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
-    !VramChunkMax             = $0800  ; VramChunkMax: Maximum bytes to DMA per frame during door transition VRAM updates.
-                                       ;     Vanilla transfers all data in one frame (~50 scanlines of forced blank), which can cause lag.
-                                       ;     This splits large transfers into chunks of !VramChunkMax bytes per frame.
-                                       ;     At $0800 (2048 bytes), each chunk takes ~12 scanlines. A typical ~8KB transfer splits into ~4 frames.
-                                       ;     Set to $FFFF to disable chunking (vanilla behavior).
-
-    !EarlyMusicUpload               = 1 ; Start async SPC music upload as early as possible during door transitions.
-                                        ;     Vanilla queues music data at $82:E4AD (late), then imposes a 16-frame queue delay (2 × 8 frames from $808FC1)
-                                        ;     before the upload state machine actually begins reading source data. This means old music keeps playing
-                                        ;     most of the way through the door transition, and the async upload has less time to complete before
-                                        ;     the fade-in. When this is set, a hook after $82:DEF2 (state header load, which sets $07CB = new music
-                                        ;     data index) starts the async upload immediately, and the vanilla $82:E071 call at $82:E4AD becomes a no-op.
-                                        ;     0: Vanilla timing - upload starts ~16+ frames after $82:E4AD.
-                                        ;     1: Start upload as soon as $07CB is known (right after $82:DEF2 state header load).
-    !WaitForMusicUploadBeforeFadeIn = 1 ; Block the door transition fade-in until the async music upload has fully completed.
-                                        ;     Without this, our PreUploadHook clears the music queue entry immediately on async upload start,
-                                        ;     so $82:E664's "music queued?" check returns false even though the upload is still pumping bytes.
-                                        ;     Game state then advances to main gameplay ($08) with audio silent until upload finishes, after
-                                        ;     which all queued SFX fire at once. With this enabled, $82:E664 additionally waits for
-                                        ;     !RamAsyncSpcState == 0 (idle) before advancing to $E6A2.
-                                        ;     0: Vanilla behavior - fade in immediately after queue clears (may result in silent main gameplay).
-                                        ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
+    !ScreenFadesOut             = 1       ; Set to 0 to make the screen not fade out during door transitions. This was useful for testing this patch, but it looks unpolished, not really suitable for a real hack.
+    !VanillaCode                = 0       ; Set to 1 to compile the vanilla door transition code instead of mine. Was useful for debugging.
+    !VramChunkMax               = $0800   ; Maximum bytes to DMA per frame during door transition VRAM updates.
+                                          ;     Vanilla transfers all data in one frame (~50 scanlines of forced blank), which can cause lag.
+                                          ;     This splits large transfers into chunks of !VramChunkMax bytes per frame.
+                                          ;     At $0800 (2048 bytes), each chunk takes ~12 scanlines. A typical ~8KB transfer splits into ~4 frames.
+                                          ;     Set to $FFFF to disable chunking (vanilla behavior).
+    !WaitForMusicUploadBeforeFadeIn = 0   ; Block the door transition fade-in until the async music upload has fully completed.
+                                          ;     0: Fade in immediately after queue clears (may result in silent main gameplay until music loading completes).
+                                          ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
     !MusicStopWaitFrames            = $08 ; Frames to wait between sending "stop music" ($00) and "start fast upload" ($FE) in EarlyStart.
-                                        ;     The SPC music engine is typically mid-note (DSP voices sustaining) when we interrupt it. If we
-                                        ;     jump straight to the fast upload ($FE) without first giving the engine time to process a stop
-                                        ;     command and key-off its active voices, the DSP keeps playing the last-loaded samples while we
-                                        ;     overwrite ARAM — producing stuck notes and audible glitches as samples are replaced in real
-                                        ;     time. Vanilla's music queue imposes an identical 8-frame gap between the stop entry and the
-                                        ;     data entry via $808FC1 (see $82:E087/$E091 → JSL $808FC1, 8-frame timer each).
-                                        ;     Frame counting uses $05B8 (the 16-bit NMI counter, incremented every NMI in BRANCH_RETURN).
-                                        ;     We deliberately do NOT use $05B5 (the 8-bit non-lag game frame counter) because during door
-                                        ;     transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0 every frame, making any
-                                        ;     wait against it impossible to satisfy. $05B8 is the only frame-like counter that advances
-                                        ;     reliably across door transitions. Note this counts ALL NMIs including lag frames, but during
-                                        ;     a door transition the game runs at full speed so the difference is negligible.
-                                        ;     Only used when !EarlyMusicUpload = 1; the vanilla PreUploadHook path already inherits vanilla's
-                                        ;     8-frame queue gap naturally.
-                                        ;     Range: $0001..$7FFF (signed 16-bit delta). $08 matches vanilla timing.
+                                          ;     Audio glitches can occur if this is too low, as the old music is mid-note and does not have time to stop playing while new music data loads.
+                                          ;     Only used when !EarlyMusicUpload = 1; otherwise vanilla code naturally has the 8 frame wait.
+                                          ;     Range: $0001..$7FFF (signed 16-bit delta). $08 matches vanilla timing.
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
-    !Freespace80ReportStart := !Freespace80
-    !Freespace82ReportStart := !Freespace82
+    !Freespace80ReportStart       := !Freespace80
+    !Freespace82ReportStart       := !Freespace82
 
     ; Vanilla variables
     !RamDoorTransitionFunctionPointer = $099C
@@ -207,11 +196,11 @@ math pri on
     ;    3: Up
     ;    +4: Close a door on next screen
     ;}
-    !RamDoorVramUpdateFlag                = $05BC ; 16-bit. Bit 15 = VRAM transfer pending.
-    !RamDoorVramUpdateDestination         = $05BE ; 16-bit. VRAM destination address (in words).
-    !RamDoorVramUpdateSource              = $05C0 ; 16-bit. DMA source address (low 16 bits).
-    !RamDoorVramUpdateSourceBank          = $05C2 ; 8-bit. DMA source bank.
-    !RamDoorVramUpdateSize                = $05C3 ; 16-bit. DMA transfer size (in bytes).
+    !RamDoorVramUpdateFlag            = $05BC ; 16-bit. Bit 15 = VRAM transfer pending.
+    !RamDoorVramUpdateDestination     = $05BE ; 16-bit. VRAM destination address (in words).
+    !RamDoorVramUpdateSource          = $05C0 ; 16-bit. DMA source address (low 16 bits).
+    !RamDoorVramUpdateSourceBank      = $05C2 ; 8-bit. DMA source bank.
+    !RamDoorVramUpdateSize            = $05C3 ; 16-bit. DMA transfer size (in bytes).
 
     ; Vanilla ROM data that we read as a constant. Writing the expected value here so patch conflict checkers will detect if another patch modifies this address.
     !UpDoorYDestinationOffset = $80ADF0  ; Vanilla value: $0020 (operand of ADC #$0020 at $80:ADEF)
@@ -254,7 +243,6 @@ math pri on
     ;  - place door transition tiles as close to the edge of the screen as you want
     ;  - make the SM scrolling code updates only apply if two phase scrolling is disabled (this would require moving secondary scrolling back to before the new room gets loaded as in vanilla - a big change)
     ; 1.x:
-    ;  - "async" music loading a-la https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283 - look for the quickboot_spc_state stuff by nobodynada
     ;  - todo: reach out to ocesse,
     ;  - NOTE: The easing multiply only handles 8-bit distances (0-255 pixels).
     ;         Primary scrolling uses fixed screen offsets ($0100 horizontal, $00E0 vertical),
@@ -1187,6 +1175,141 @@ if !VanillaCode == 0
     org $80980F
         JSR CheckIfVramUpdateNeeded_horizontal_bottomOfScreen
 
+    ; Chunked VRAM transfer: splits large DMA transfers across multiple frames to reduce IRQ pressure.
+    ; Called via JSL from $9632. All callers had 16-bit A (REP #$20) active.
+    ; Updates !RamDoorVramUpdateSource, !RamDoorVramUpdateDestination, !RamDoorVramUpdateSize in-place after each chunk.
+    ; Only clears the !RamDoorVramUpdateFlag pending flag after the last chunk completes.
+    org !FreespaceAnywhere
+    ChunkedVramTransfer: {
+            ; A is 16-bit on entry
+            ; Guard: skip if no transfer is pending (bit 15 of flag clear).
+            ; The vanilla $9632 routine had this check internally. Two of the four callers
+            ; (vertical_topOfScreen, horizontal_bottomOfScreen) rely on $9632 to check the flag
+            ; rather than checking it themselves, so this guard must remain here.
+            LDA !RamDoorVramUpdateFlag : BPL .noTransfer
+
+            LDA !RamDoorVramUpdateSize          ; remaining transfer size
+            CMP #!VramChunkMax+1
+            BCC .useRemaining               ; if remaining <= chunk max, transfer all of it
+            LDA #!VramChunkMax              ; else cap at chunk max
+        .useRemaining:
+            PHA                             ; push this_chunk_size
+    
+            ; Force blank
+            SEP #$20
+            LDA #$80 : STA $2100
+    
+            ; Configure DMA channel 1
+            LDX !RamDoorVramUpdateDestination : STX $2116 ; VRAM destination
+            LDX #$1801 : STX $4310                    ; DMA control: 16-bit VRAM write (register $2118, mode 1)
+            LDX !RamDoorVramUpdateSource : STX $4312      ; DMA source address
+            LDA !RamDoorVramUpdateSourceBank : STA $4314  ; DMA source bank
+            LDA #$80 : STA $2115                      ; VRAM address increment mode (increment after high byte write)
+            REP #$20
+            LDA $01,s : STA $4315                     ; DMA size = this_chunk_size from stack
+            SEP #$20
+            LDA #$02 : STA $420B                      ; Execute DMA on channel 1
+    
+            ; Update source, dest, remaining in-place for next chunk
+            REP #$20
+    
+            ; source address += this_chunk_size
+            LDA $01,s
+            CLC : ADC !RamDoorVramUpdateSource
+            STA !RamDoorVramUpdateSource
+    
+            ; VRAM dest += this_chunk_size / 2 (VRAM addresses are in words, DMA size is in bytes)
+            LDA $01,s
+            LSR A
+            CLC : ADC !RamDoorVramUpdateDestination
+            STA !RamDoorVramUpdateDestination
+    
+            ; remaining -= this_chunk_size
+            LDA !RamDoorVramUpdateSize
+            SEC : SBC $01,s
+            STA !RamDoorVramUpdateSize
+    
+            PLA                             ; clean this_chunk_size off stack
+    
+            ; If remaining == 0, transfer is complete
+            LDA !RamDoorVramUpdateSize
+            BNE .moreRemaining
+
+            ; Transfer complete: clear the pending flag so Bank $82 polling loop can continue
+            LDA #$8000 : TRB !RamDoorVramUpdateFlag
+
+        .moreRemaining:
+            ; If more data remains, flag stays set.
+            ; Next frame's IRQ will call $9632 again, which JSLs here for the next chunk.
+
+            SEP #$20
+            LDA #$0F : STA $2100            ; restore screen brightness (disable forced blank)
+        .noTransfer:
+            REP #$20                        ; match original routine's exit state (16-bit A)
+            RTL
+    
+            .freespace
+    }
+    !FreespaceAnywhere := ChunkedVramTransfer_freespace
+    warnpc !FreespaceAnywhereEnd
+
+    org !Freespace80
+    CheckIfVramUpdateNeeded: {
+        .vertical
+        ..topOfScreen
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL ++
+            JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
+        ++  RTS
+        ..bottomOfScreen
+            PHA ; need to preserve A here due to the routine we hijacked
+            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
+            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI ++
+            ; Door tube is high - execute VRAM update now if needed.
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  PLA
+            LDY #$0000 ; instruction replaced by hijack
+            RTS
+
+        .horizontal
+        ..topOfScreen
+            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
+            JSR ..compareYPosition : BMI ++
+            ; Door is low - move down if needed.
+            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
+        ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
+            RTS
+        ..bottomOfScreen
+            ; This hijack replaces vanilla's unconditional `JSR $9632` at $80:980F (IRQ command $1A).
+            ; Vanilla's command $1A is the ONLY place $05BC gets cleared in the horizontal IRQ cycle.
+            ; During early room loading (BEFORE the scroll wait at $82:E526), for UP doors
+            ; $82:E3FB sets the interrupt command to $16 (horizontal cycle) - only DOWN doors use
+            ; the vertical cycle during phase 1. $82:E49D only later switches UP doors to vertical.
+            ; So during phase 1, the $82:E06B wait loops at $E446/E450/E45A/E474/E488 rely on the
+            ; HORIZONTAL IRQ handlers to clear $05BC, even for UP doors.
+            ; If we skip on vertical direction, $05BC never clears → softlock at $82:E06B.
+            ; Fix: match vanilla behavior (unconditional $9632) for non-horizontal directions.
+            LDA !RamDoorDirection : BIT #$0002 : BNE +  ; If vertical transition: fall through to unconditional $9632 (match vanilla).
+            JSR ..compareYPosition : BPL ++             ; Else horizontal: only if door is high (else delay to next frame).
+        +   JSR $9632 ; Execute VRAM update now. (Caller already checked that $05BC bit 15 is set.)
+        ++  RTS
+
+        ..compareYPosition
+            LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
+            PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
+            RTS
+
+        .freespace
+    }
+    !Freespace80 := CheckIfVramUpdateNeeded_freespace
+    warnpc !Freespace80End
+}
+
+; ===============================================
+; ============== ASYNC SPC UPLOADS ==============
+; ===============================================
+{
+    if !AsyncMusicUploadEnabled > 0
     ; ============ Async SPC Upload Hijacks ============
 
     ; Guard the music queue handler ($808F0C) to skip entirely when an async upload is in progress.
@@ -1277,84 +1400,6 @@ if !VanillaCode == 0
         warnpc $82E6A2
     endif
 
-    ; Chunked VRAM transfer: splits large DMA transfers across multiple frames to reduce IRQ pressure.
-    ; Called via JSL from $9632. All callers had 16-bit A (REP #$20) active.
-    ; Updates !RamDoorVramUpdateSource, !RamDoorVramUpdateDestination, !RamDoorVramUpdateSize in-place after each chunk.
-    ; Only clears the !RamDoorVramUpdateFlag pending flag after the last chunk completes.
-    org !FreespaceAnywhere
-    ChunkedVramTransfer: {
-            ; A is 16-bit on entry
-            ; Guard: skip if no transfer is pending (bit 15 of flag clear).
-            ; The vanilla $9632 routine had this check internally. Two of the four callers
-            ; (vertical_topOfScreen, horizontal_bottomOfScreen) rely on $9632 to check the flag
-            ; rather than checking it themselves, so this guard must remain here.
-            LDA !RamDoorVramUpdateFlag : BPL .noTransfer
-
-            LDA !RamDoorVramUpdateSize          ; remaining transfer size
-            CMP #!VramChunkMax+1
-            BCC .useRemaining               ; if remaining <= chunk max, transfer all of it
-            LDA #!VramChunkMax              ; else cap at chunk max
-        .useRemaining:
-            PHA                             ; push this_chunk_size
-    
-            ; Force blank
-            SEP #$20
-            LDA #$80 : STA $2100
-    
-            ; Configure DMA channel 1
-            LDX !RamDoorVramUpdateDestination : STX $2116 ; VRAM destination
-            LDX #$1801 : STX $4310                    ; DMA control: 16-bit VRAM write (register $2118, mode 1)
-            LDX !RamDoorVramUpdateSource : STX $4312      ; DMA source address
-            LDA !RamDoorVramUpdateSourceBank : STA $4314  ; DMA source bank
-            LDA #$80 : STA $2115                      ; VRAM address increment mode (increment after high byte write)
-            REP #$20
-            LDA $01,s : STA $4315                     ; DMA size = this_chunk_size from stack
-            SEP #$20
-            LDA #$02 : STA $420B                      ; Execute DMA on channel 1
-    
-            ; Update source, dest, remaining in-place for next chunk
-            REP #$20
-    
-            ; source address += this_chunk_size
-            LDA $01,s
-            CLC : ADC !RamDoorVramUpdateSource
-            STA !RamDoorVramUpdateSource
-    
-            ; VRAM dest += this_chunk_size / 2 (VRAM addresses are in words, DMA size is in bytes)
-            LDA $01,s
-            LSR A
-            CLC : ADC !RamDoorVramUpdateDestination
-            STA !RamDoorVramUpdateDestination
-    
-            ; remaining -= this_chunk_size
-            LDA !RamDoorVramUpdateSize
-            SEC : SBC $01,s
-            STA !RamDoorVramUpdateSize
-    
-            PLA                             ; clean this_chunk_size off stack
-    
-            ; If remaining == 0, transfer is complete
-            LDA !RamDoorVramUpdateSize
-            BNE .moreRemaining
-
-            ; Transfer complete: clear the pending flag so Bank $82 polling loop can continue
-            LDA #$8000 : TRB !RamDoorVramUpdateFlag
-
-        .moreRemaining:
-            ; If more data remains, flag stays set.
-            ; Next frame's IRQ will call $9632 again, which JSLs here for the next chunk.
-
-            SEP #$20
-            LDA #$0F : STA $2100            ; restore screen brightness (disable forced blank)
-        .noTransfer:
-            REP #$20                        ; match original routine's exit state (16-bit A)
-            RTL
-    
-            .freespace
-    }
-    !FreespaceAnywhere := ChunkedVramTransfer_freespace
-    warnpc !FreespaceAnywhereEnd
-
     ; ============ Async SPC Music Upload ============
     ; Replaces the vanilla blocking SPC upload ($80:8024) with a multi-frame state machine.
     ; Instead of uploading all music data inside a single call (5-20 frames of blocking),
@@ -1402,725 +1447,675 @@ if !VanillaCode == 0
     org !FreespaceAnywhere
     AsyncSpcUpload: {
 
-    ; ---- Pre-upload hook: called from $80:8F72 hijack (replaces LDA $8FE7E1,x) ----
-    ; Context: called from BRANCH_MUSIC_DATA in the music queue handler.
-    ; A is 16-bit (REP #$20 at $8F70). X = music data index (16-bit).
-    ;
-    ; Vanilla code flow at this point:
-    ;   $8F72: LDA $8FE7E1,x  ← we hijack this (4 bytes, exact replacement)
-    ;   $8F76: STA $00         ← sets up source pointer low
-    ;   $8F78: LDA $8FE7E2,x  ← loads source pointer high + bank
-    ;   $8F7C: STA $01         ← sets up source pointer high + bank
-    ;   $8F7E: JSL $808024     ← total's patch replaced this with jsl fast_spc_init_long
-    ;   $8F82: SEP #$20        ← post-upload code continues here
-    ;
-    ; For door transitions: we execute $8F72-$8F7D internally, start async upload,
-    ;   then adjust the return address to skip $8F7E and land at $8F82.
-    ; For non-door transitions: we execute the replaced LDA and return to $8F76,
-    ;   letting execution flow naturally into $8F7E (total's fast blocking upload).
-    .PreUploadHook:
-        ; Execute the replaced instruction
-        LDA $8FE7E1,x
-
-        ; Check if we should use async upload (door transition, game state $09-$0B)
-        PHA                                     ; save A (needed for STA $00 at $8F76 if vanilla path)
-        LDA !RamGameState
-        CMP #$0009 : BCC .PuhVanilla            ; < $09: not door transition
-        CMP #$000C : BCS .PuhVanilla            ; >= $0C: not door transition
-        LDA !RamAsyncSpcState : BNE .PuhVanilla ; already active — let blocking handle it
-        PLA                                     ; restore A (source pointer low bytes)
-
-        ; --- Door transition: start async upload ---
-
-        ; Execute the instructions we're skipping over ($8F76-$8F7D):
-        STA $00                                 ; $8F76: STA $00
-        LDA $8FE7E2,x                          ; $8F78: LDA $8FE7E2,x
-        STA $01                                 ; $8F7C: STA $01
-        ; DP $00-$02 now has the source pointer, same as vanilla reaching $8F7E.
-
-        ; Start async state machine
-        PHP
-        REP #$30
-        LDA $00 : STA !RamAsyncSpcDataY         ; save source pointer Y
-        SEP #$20
-        LDA $02 : STA !RamAsyncSpcDataBank      ; save source bank
-
-        ; Set uploading flag (prevents music queue handler and sound handler from touching APU ports)
-        REP #$20
-        LDA #$FFFF : STA $0617
-
-        ; Send $FE to APU IO 0 to request fast upload mode (total's protocol)
-        SEP #$20
-        LDA #$FE : STA $002140                  ; long addr: DB may not be bank $00/$80
-
-        ; Set initial state: wait for SPC to respond with $11AA on IO 2-3
-        REP #$20
-        LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
-        PLP
-
-        ; Skip $8F76-$8F7E by adjusting the return address on the stack.
-        ; JSL at $8F72 pushed return addr $8F75 (RTL goes to $8F76).
-        ; We want RTL to go to $8F82 instead → set return addr to $8F81 (RTL adds 1).
-        ; Stack: S+1=PCL($75), S+2=PCH($8F), S+3=PBR($80)
-        SEP #$20
-        LDA #$81 : STA $01,s                   ; PCL = $81 → RTL returns to $8F82
-        RTL
-
-    .PuhVanilla:
-        ; Not a door transition (or async already active).
-        ; Restore A (the LDA $8FE7E1,x result) and return to $8F76.
-        ; Normal flow continues: STA $00, LDA, STA $01, then $8F7E (total's upload).
-        PLA
-        RTL
-
-    ; ---- Early start hook: hijack entry point for $82:E37F ----
-    ; Vanilla $82:E37F is `JSL $8882C1` (Initialise special effects for new room). Our hijack
-    ; replaces that JSL with `JSL AsyncSpcUpload_EarlyStartHook`, which first executes the
-    ; replaced instruction and then tail-jumps into .EarlyStart. The tail jump is safe because
-    ; .EarlyStart's final RTL will return to the caller of this hook (= the caller of the
-    ; vanilla $82:E37F instruction = door transition function $82:E36E).
-    .EarlyStartHook:
-        JSL $8882C1                             ; execute the replaced instruction
-        JMP .EarlyStart                         ; tail call: .EarlyStart RTLs for us
-
-    ; ---- Early start: kick off async upload the instant $07CB is known ----
-    ; Called from the $82:E37F hijack wrapper, immediately after $JSR $DEF2 (state header load)
-    ; has set $07CB = new room's music data index. At this point we're inside door transition
-    ; function $82:E36E, game state = $0B, and screen is fully faded to black.
-    ;
-    ; Vanilla flow otherwise: $82:E071 is called at $82:E4AD (much later), which queues music
-    ; stop + music data into $0619/$0629 via $808FC1. Each queue entry sets an 8-frame timer,
-    ; so the actual `LDA $8FE7E1,x` hook doesn't fire for ~16 frames AFTER $E4AD. Net delay
-    ; from "touched door" to "old music stops playing" is ~50-70 frames.
-    ;
-    ; With this hook, we bypass the music queue entirely and start our async state machine
-    ; directly from the $8F:E7E1 pointer table. We also update $07F3 = $07CB so the later
-    ; $82:E071 call at $E4AD becomes a no-op (its `CMP $07F3 : BEQ return` check fires).
-    ;
-    ; Music-stop sequencing: we do NOT send $FE immediately. Vanilla's music queue path imposes
-    ; an 8-frame delay between "stop music" ($00) and "upload data" because each $808FC1 call
-    ; primes an 8-frame queue timer. The gap gives the SPC music engine time to read $00 from
-    ; IO 0, process it through dispatch, and key-off any sustaining DSP voices before we start
-    ; overwriting ARAM. Without this gap, the DSP keeps playing the last-loaded samples until
-    ; we clobber them mid-note, producing stuck notes and sample-swap glitches.
-    ;
-    ; We match vanilla timing: write $00 to IO 0 here, capture $05B8 + !MusicStopWaitFrames as
-    ; the target frame, and transition to .StateStopWait. StateStopWait polls $05B8 from the
-    ; pump loop and, once the target is reached, writes $FE and transitions to .StateInit.
-    ;
-    ; Preconditions on entry:
-    ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
-    ;   - P state is whatever $82:E36E was in — we PHP/PLP to restore
-    ; Postconditions:
-    ;   - If $07CB == 0 or $07CB == $07F3 (no music change): no-op
-    ;   - If already uploading (!RamAsyncSpcState != 0): no-op
-    ;   - Otherwise: "stop music" queued to SPC, $0617 set, $07F3 updated, state = StopWait
-    .EarlyStart:
-        PHP
-        PHB
-        REP #$30
-        PHX
-
-        ; Skip if async upload already in progress (e.g., re-entry, or door asm ran twice)
-        LDA !RamAsyncSpcState : BNE .EsReturn
-
-        ; Load new room's music data index ($07CB is set by $82:DEF2).
-        ; Vanilla $82:DF3B-$DF3E masks with #$00FF and stores as 16-bit, so $07CC = 0 — a
-        ; plain 16-bit read gives the value directly.
-        LDA $07CB : BEQ .EsReturn               ; if index = 0: no music → skip
-        CMP $07F3 : BEQ .EsReturn               ; if same as current music data: no change → skip
-
-        ; New room's music differs. Start async upload immediately.
-        ; Update $07F3 so the later $82:E071 at $E4AD sees "no change" and becomes a no-op.
-        STA $07F3
-
-        ; Fetch source pointer from the music data pointer table at $8F:E7E1.
-        ; Table entries are 3 bytes each (24-bit pointers); the music data index in $07CB
-        ; is a pre-multiplied byte offset (0, 3, 6, 9, ...).
-        ; DB may be $82 here, so temporarily set DB = $8F for the table access.
-        TAX                                     ; X = music data index (byte offset)
-        PHB
-        PEA $8F8F : PLB : PLB                   ; DB = $8F
-        LDA $E7E1,x                             ; 16-bit: low 2 bytes of 3-byte pointer = offset
-        STA !RamAsyncSpcDataY                   ; save source offset (low 16 bits)
-        SEP #$20
-        LDA $E7E3,x                             ; 8-bit: 3rd byte of pointer = bank
-        STA !RamAsyncSpcDataBank                ; save source bank
-        LDA #$FF : STA $064C                    ; current music track = $FF (match $80:8F6D)
-
-        ; Mirror vanilla "stop track" queue side-effect: clear $07F5/$07F6 (current music track index).
-        ; Vanilla's $82:E071 path queues a track-0 entry, which the queue handler at $80:8F18-8F2A
-        ; processes by writing 0 to $07F5, $07F6, $2140 — i.e. it clears the SNES-side "current
-        ; track" tracking as well as sending the stop byte. We send $00 to $2140 directly (below)
-        ; without going through the queue, so we must replicate the $07F5 clear ourselves.
-        ; Without this, $82:E0D5 (called from our $82:E664 replacement after the upload finishes)
-        ; sees $07F5 == new room's $07C9 whenever the new room reuses the same track number as the
-        ; previous room (very common — most rooms use track 1) and returns early without queuing
-        ; the new track, leaving the room silent. Use 16-bit STZ so $07F5+$07F6 are both cleared,
-        ; matching vanilla's $80:8F21/$8F24 STA/STZ pair.
-        REP #$20                                ; 16-bit A for the dual STZ below (and for $05B8 read)
-        STZ $07F5                               ; current music track index = 0 (clears both $07F5 and $07F6)
-
-        ; Stage 1: send "stop music" ($00) to IO 0 and arm the StopWait countdown.
-        ; The SPC music engine's dispatch loop will see $00 on IO 0, interpret it as a music
-        ; track index of 0, and kill the current song. We then wait !MusicStopWaitFrames frames
-        ; (matching vanilla's $808FC1 timer) before sending $FE to request fast upload mode.
-        SEP #$20
-        LDA #$00 : STA $002140                  ; IO 0 = $00 (stop music command)
-        REP #$20                                ; 16-bit A for 16-bit NMI counter
-        LDA $05B8                               ; current 16-bit NMI counter (WRAM mirror at DB=$8F)
-        CLC : ADC.w #!MusicStopWaitFrames       ; target = now + wait (16-bit wrap OK, compared signed in StateStopWait).
-                                                ;   .w suffix is REQUIRED — asar's immediate-size heuristic uses the hex
-                                                ;   digit count of the literal, not the M flag, so a 2-digit value like
-                                                ;   $08 would otherwise be emitted as an 8-bit immediate (2 bytes), causing
-                                                ;   the next instruction's opcode byte to be consumed as the high byte of
-                                                ;   the immediate at runtime — silently dropping the STA below.
-        STA !RamAsyncSpcStopWaitTarget          ; save target (full 16-bit)
-        PLB                                     ; restore DB
-
-        ; Set uploading flag (guards sound handler / music queue handler from APU port writes).
-        ; Must be set BEFORE returning so that the sound handler, which runs later in the same
-        ; frame at $82:896E, skips itself and doesn't stomp our $00 write to IO 0.
-        LDA #$FFFF : STA $0617
-
-        ; Initial state: StopWait (countdown, then send $FE and transition to Init).
-        LDA #!AsyncSpcStateStopWait : STA !RamAsyncSpcState
-
-    .EsReturn:
-        PLX
-        PLB
-        PLP
-        RTL
-
-    ; ---- Pump wrapper for scroll wait loop ($82:E526 hijack) ----
-    ; Vanilla: LDA $0931 / BPL $FB (tight busy loop)
-    ; We replace the entire loop: pump SPC bytes, check $0931, repeat internally until done.
-    ; The loop lives HERE so we never re-enter the JSL and never leak stack frames.
-    .ScrollWaitPump:
-        PHP
-    .ScrollWaitLoop:
-        REP #$20
-        JSR .Dispatch
-        REP #$20                                ; ensure 16-bit A after Dispatch (state handlers may leave M=1)
-        LDA $0931                               ; 16-bit load — vanilla checks bit 15 ($8000 = done)
-        BPL .ScrollWaitLoop                     ; tight poll until bit 15 set (same as vanilla BPL $FB)
-        PLP
-        RTL                                     ; return to $82:E52B (after the hijacked 5 bytes)
-
-    ; ---- Pump wrapper for NMI-wait loop ($80:8343 hijack) ----
-    ; Vanilla: LDA $05B4 / BNE $FB (tight busy loop)
-    ; Same fix: loop internally so we never re-enter the JSL.
-    .NmiWaitPump:
-        PHP
-    .NmiWaitLoop:
-        REP #$20
-        JSR .Dispatch
-        SEP #$20
-        LDA $05B4                               ; check NMI request flag
-        BNE .NmiWaitLoop                        ; tight poll — no WAI (same race condition risk)
-        PLP
-        RTL                                     ; return to $80:8348 (after the hijacked 5 bytes)
-
-    ; ---- Dispatch: call current state handler if active ----
-    ; Called via JSR with 16-bit A. X/Y size may vary (8-bit from NMI-wait, 16-bit from scroll-wait).
-    ; We force 16-bit X/Y before push/pop to ensure stack balance regardless of caller state.
-    .Dispatch:
-        LDA !RamAsyncSpcState : BEQ .DispatchIdle
-
-        ; Game-state guard: only dispatch during game states where our upload can legitimately
-        ; be active. NmiWaitPump ($80:8343 hijack) runs during ALL game states because $80:8338
-        ; is the universal "wait for NMI" routine. But our upload is only started during door
-        ; transitions ($09-$0B) and must complete before reaching main gameplay ($07-$08).
-        ; Outside this range — pause ($0C-$12), death ($13-$1A), ending ($27), etc. — our RAM
-        ; may be repurposed (e.g., $7F:F800-FFFF is the ending blank tilemap) and reading
-        ; !RamAsyncSpcState would return garbage, crashing the game via the jump table.
-        ; Mirrors the PreUploadHook's game state check at .PuhVanilla.
-        LDA !RamGameState
-        CMP #$0007 : BCC .DispatchIdle          ; < $07: title/intro states — skip
-        CMP #$000C : BCC .DispatchOk            ; $07-$0B: gameplay + door transition — proceed
-        ; >= $0C: pause, death, ending, etc. — skip
-    .DispatchIdle:
-        RTS
-
-    .DispatchOk:
-        ; Bounds check: if state > max valid entry, RAM has been corrupted by external code.
-        ; Force-recover to idle so a corrupt state can never index past the jump table.
-        LDA !RamAsyncSpcState
-        CMP #!AsyncSpcStateStopWait+2           ; compare against first INVALID state index
-        BCS .DispatchCorrupt
-
-        REP #$30                                ; force 16-bit A AND X/Y before push (critical for stack balance!)
-        PHX : PHY : PHB
-        PHK : PLB                               ; DB = code bank (for jump table)
-        TAX                                     ; X = state number (16-bit, pre-multiplied by 2)
-        JSR (.JumpTable,x)
-        REP #$10                                ; ensure 16-bit X/Y for pop (state handlers may have changed it)
-        PLB : PLY : PLX
-        RTS
-
-    .DispatchCorrupt:
-        ; State is outside valid range — external write stomped our RAM.
-        ; Force everything back to idle. Upload is lost but the game stays alive.
-        LDA #$0000
-        STA !RamAsyncSpcState                   ; state = idle
-        STA $0617                               ; clear upload flag (unblock music queue + sound handler)
-        RTS
-
-    .JumpTable:
-        dw $0000                                ; 0 = idle (should never be reached)
-        dw .StateInit                           ; 2 = Init
-        dw .StateNextBlock                      ; 4 = NextBlock
-        dw .StateBlockWait                      ; 6 = BlockWait
-        dw .StateTransfer                       ; 8 = Transfer
-        dw .StateEofWait                        ; 10 = EofWait
-        dw .StateComplete                       ; 12 = Complete
-        dw .StateStopWait                       ; 14 = StopWait (EarlyStart only)
-
-    ; ---- State: StopWait (EarlyStart only) ----
-    ; Entered from .EarlyStart after writing $00 (stop music) to IO 0 and arming
-    ; !RamAsyncSpcStopWaitTarget = ($05B8 at entry) + !MusicStopWaitFrames.
-    ;
-    ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
-    ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
-    ; clobber ARAM with fast upload data. Vanilla achieves the same effect via two back-to-
-    ; back $808FC1 calls, each priming an 8-frame music queue timer.
-    ;
-    ; Frame counter: $05B8 is the 16-bit NMI counter (incremented every NMI in BRANCH_RETURN
-    ; at $80:95F9, including via the BRANCH_LAG fall-through). We deliberately do NOT use
-    ; $05B5 — during door transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0
-    ; every frame, so a wait against $05B5 can never be satisfied. $05B8 is the only frame-
-    ; like counter that advances reliably across door transitions. The state machine pump is
-    ; called many times per frame from .ScrollWaitPump / .NmiWaitPump loops, so we just poll
-    ; $05B8 each dispatch.
-    ;
-    ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
-    ; passed the target. This tolerates 16-bit wraparound as long as the wait is < 32768
-    ; frames (!MusicStopWaitFrames range $0001..$7FFF; default $0008).
-    ;
-    ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
-    ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
-    .StateStopWait:
-        REP #$20
-        LDA $05B8                               ; current 16-bit NMI counter
-        SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
-        BMI .SwWaiting                          ; if current < target (bit 15 set): still waiting
-
-        ; Wait satisfied. Kick off the fast upload.
-        SEP #$20
-        LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
-        REP #$20
-        LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
-        RTS
-    .SwWaiting:
-        RTS
-
-    ; ---- State: Init ----
-    ; Wait for SPC to respond with $11AA on IO 2-3.
-    ; We already sent $FE to IO 0 (from .Start directly, or from .StateStopWait after the
-    ; stop-wait countdown). The SPC music engine periodically checks IO 0 for commands;
-    ; when it sees $FE, total's command hook routes to the fast upload handler at ARAM
-    ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
-    .StateInit:
-        REP #$20
-        LDA $2142 : CMP #$11AA : BNE .InitNotReady
-
-        ; SPC is ready. Transition to NextBlock.
-        LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
-    .InitNotReady:
-        RTS
-
-    ; ---- State: NextBlock ----
-    ; Wait for $11AA on IO 2-3, then read block header and send to SPC.
-    ; Block header format in source data: 2-byte size + 2-byte dest address.
-    ; If size=0, this is the EOF marker — upload is finishing.
-    ;
-    ; Protocol (total's $FE):
-    ;   CPU sends dest addr to IO 0-1.
-    ;   CPU sends $00BB to IO 2-3 (tells SPC "address sent").
-    ;   SPC reads dest from $F4-$F5, writes $CC to $F6 (CPU sees $xxCC on IO 2-3).
-    ;   For EOF: CPU sends $0000 to IO 0-1 and $00BB to IO 2-3.
-    .StateNextBlock:
-        ; Wait for $11AA (SPC ready for a new block header).
-        ; First block: Init already confirmed $11AA, this re-check is instant.
-        ; Subsequent blocks: SPC re-enters fastspc after end-of-block, sets $11AA quickly.
-        REP #$20
-        LDA $2142 : CMP #$11AA : BNE .NbNotReady
-
-        SEP #$20
-        PHB
-        LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
-        REP #$30                                ; 16-bit A AND X/Y
-        LDA !RamAsyncSpcDataY : TAY             ; Y = source offset (16-bit)
-
-        ; Read block size (2 bytes)
-        LDA $0000,y
-        STA !RamAsyncSpcBlockSize
-        ; Advance Y past size field
-        INY : BNE +
-        JSR .IncBank
-    +   INY : BNE +
-        JSR .IncBank
-    +
-
-        ; Check for EOF (size == 0)
-        LDA !RamAsyncSpcBlockSize : BEQ .NbEof
-
-        ; Read destination address (2 bytes)
-        LDA $0000,y
-        STA $002140                             ; IO 0-1 = dest address (long addr: DB is source bank, not $00)
-        ; Advance Y past dest field
-        INY : BNE +
-        JSR .IncBank
-    +   INY : BNE +
-        JSR .IncBank
-    +
-
-        ; Save source pointer (now past the 4-byte header, pointing at data start)
-        TYA : STA !RamAsyncSpcDataY
-
-        ; Tell SPC: "address sent" ($00BB to IO 2-3)
-        LDA #$00BB : STA $002142                ; long addr: DB is source bank
-
-        ; Reset handshake counter for transfer
-        SEP #$20
-        LDA #$00 : STA !RamAsyncSpcIndex
-
-        ; Transition to BlockWait
-        REP #$20
-        LDA #!AsyncSpcStateBlockWait : STA !RamAsyncSpcState
-
-        PLB
-        RTS
-
-    .NbEof:
-        ; EOF block: size == 0. Source pointer is past the 2-byte size (no dest to read).
-        TYA : STA !RamAsyncSpcDataY
-
-        ; Send dest=$0000 to IO 0-1 (signals EOF to SPC)
-        LDA #$0000 : STA $002140                ; long addr: DB is source bank
-        ; Tell SPC: "address sent"
-        LDA #$00BB : STA $002142                ; long addr: DB is source bank
-
-        ; Transition to EofWait (wait for SPC to acknowledge with $11CC)
-        LDA #!AsyncSpcStateEofWait : STA !RamAsyncSpcState
-
-        PLB
-        RTS
-
-    .NbNotReady:
-        RTS
-
-    ; ---- State: BlockWait ----
-    ; Wait for SPC to acknowledge block header with $11CC on IO 2-3.
-    ; SPC reads dest from $F4-$F5, writes $CC to $F6. CPU sees $xxCC on IO 2-3.
-    ; After this, SPC enters .transfer and waits for the first data counter on $F6.
-    .StateBlockWait:
-        REP #$20
-        LDA $2142 : CMP #$11CC : BNE .BwWaiting
-
-        ; SPC acknowledged. Transition to Transfer.
-        LDA #!AsyncSpcStateTransfer : STA !RamAsyncSpcState
-    .BwWaiting:
-        RTS
-
-    ; ---- State: Transfer ----
-    ; Pump up to !AsyncSpcBytesPerPump bytes per call using total's 2-byte pair protocol.
-    ;
-    ; Protocol per pair:
-    ;   - Send 2 data bytes to IO 0-1 (16-bit write)
-    ;   - Send counter to IO 2 (IO 3 stays 0 during transfer; SPC checks IO 3 bit 0 for end)
-    ;   - Wait for SPC echo of counter at IO 2 (SPC writes Y to $F6 after processing)
-    ;
-    ; Counter sequence: 0 (first pair), then 1, 3, 5, 7, ... (increment by 2 after each pair)
-    ; The first pair after $11CC also waits for $11CC to confirm SPC is ready.
-    ;
-    ; End-of-block: instead of sending next counter, send (counter-1) to IO 2 and $01 to IO 3.
-    ; SPC sees bit 0 of $F7 ($2143) set → exits transfer, re-enters fastspc for next block.
-    ;
-    ; Register usage during pump loop:
-    ;   A (8-bit) = handshake counter (next value to send)
-    ;   X (16-bit) = bytes remaining in pump budget (counts down by 2)
-    ;   Y (16-bit) = source data pointer (into current bank via DB)
-    ;
-    ; NOTE: DP $00 is NOT used — NMI can fire mid-loop and clobber DP scratch.
-    .StateTransfer:
-        SEP #$20
-        PHB
-        LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
-        REP #$30                                ; 16-bit A AND X/Y
-        LDA !RamAsyncSpcDataY : TAY             ; Y = source (16-bit)
-
-        SEP #$20
-        LDA !RamAsyncSpcIndex                   ; A = counter (8-bit)
-        REP #$10                                ; ensure 16-bit X/Y
-        LDX #!AsyncSpcBytesPerPump              ; X = pump budget in bytes
-
-        CMP #$00 : BNE .TxPumpLoop             ; counter > 0 → mid-block, resume pumping
-
-        ; --- First pair of block ---
-        ; Wait for $11CC (SPC ready for data after acknowledging block header).
-        ; BlockWait already confirmed $11CC, so this should match instantly.
-        REP #$20
-    .TxWaitReady:
-        LDA $002142 : CMP #$11CC : BNE .TxWaitReady  ; long addr: DB is source bank
-
-        ; Load and send first 2 data bytes
-        LDA $0000,y : STA $002140               ; IO 0-1 = first 2 bytes of block data (long addr)
-        ; Send counter=0 to IO 2-3
-        LDA #$0000 : STA $002142                ; long addr (no STZ long opcode exists)
-        SEP #$20
-        LDA #$01                                ; counter becomes 1 (next to send)
-        ; Y is NOT advanced here — .TxPumpLoop does INY INY at the start
-        ; to advance past the previous pair before loading the next one
-        DEX : DEX                               ; budget -= 2
-        BEQ .TxChunkDone
-        ; Fall through to pump subsequent pairs
-
-    .TxPumpLoop:
-        ; A = counter (8-bit), X = budget (16-bit), Y = source (16-bit)
-        ; Advance Y past previous pair's data
-        INY : BNE +
-        JSR .IncBank
-    +   INY : BNE +
-        JSR .IncBank
-    +
-
-        ; Decrement block size by 2
-        PHA                                     ; save counter (8-bit → 1 byte on stack)
-        REP #$20
-        LDA !RamAsyncSpcBlockSize
-        SEC : SBC #$0002
-        STA !RamAsyncSpcBlockSize
-        BEQ .TxEndBlock                         ; size == 0 → even block end
-        CMP #$FFFF : BEQ .TxEndBlockOdd         ; size == -1 → odd block end
-        SEP #$20
-        PLA                                     ; restore counter
-
-        ; Wait for SPC echo of counter at IO 2
-        ; (SPC writes Y to $F6 after processing each pair; CPU reads $F6 from IO 2)
-        ; IO 3 ($F7) stays $00 during transfer (set by SPC's `mov $f7, #$00` at .transfer entry)
-    .TxWaitEcho:
-        CMP $002142 : BNE .TxWaitEcho           ; long addr: DB is source bank
-
-        ; Send next 2 data bytes
-        PHA                                     ; save counter (need 16-bit A for data load)
-        REP #$20
-        LDA $0000,y : STA $002140               ; IO 0-1 = data pair (long addr)
-        SEP #$20
-        PLA                                     ; restore counter
-        STA $002142                             ; IO 2 = counter (long addr; IO 3 stays 0 from first pair)
-
-        ; Advance counter by 2 (wraps at 256 via 8-bit arithmetic)
-        CLC : ADC #$02
-
-        DEX : DEX                               ; budget -= 2
-        BNE .TxPumpLoop
-        ; Fall through when budget exhausted
-
-    .TxChunkDone:
-        ; Save state for next pump call
-        STA !RamAsyncSpcIndex                   ; save counter
-        REP #$20
-        TYA : STA !RamAsyncSpcDataY             ; save source pointer
-        SEP #$20
-        PHB : PLA : STA !RamAsyncSpcDataBank    ; save bank (may have changed via .IncBank)
-        PLB                                     ; restore original DB
-        RTS
-
-    .TxEndBlock:                                ; A is 16-bit here, counter is on stack (8-bit push)
-        SEP #$20
-        PLA                                     ; restore counter
-        BRA .TxSendEnd
-
-    .TxEndBlockOdd:                             ; A is 16-bit here, counter is on stack
-        SEP #$20
-        PLA                                     ; restore counter
-        DEY                                     ; back up source by 1 byte (odd block had 1 extra advance)
-        ; Fall through to send end signal
-
-    .TxSendEnd:
-        ; A = counter (8-bit). Block is finished.
-        ; Wait for SPC echo of current counter (SPC processed last pair we sent)
-    .TxWaitFinalEcho:
-        CMP $002142 : BNE .TxWaitFinalEcho      ; long addr: DB is source bank
-
-        ; Send end-of-block signal:
-        ; IO 2 = counter - 1 (doesn't match any Y the SPC expects, so SPC falls to bbc0 check)
-        ; IO 3 = $01 (bit 0 set = end flag; SPC's `bbc0 $f7` test sees it and exits transfer)
-        DEC A : STA $002142                     ; IO 2 = counter - 1 (long addr)
-        LDA #$01 : STA $002143                  ; IO 3 = end flag (long addr)
-
-        ; Save source pointer and bank
-        REP #$20
-        TYA : STA !RamAsyncSpcDataY
-        SEP #$20
-        PHB : PLA : STA !RamAsyncSpcDataBank
-
-        ; Reset counter for next block
-        LDA #$00 : STA !RamAsyncSpcIndex
-
-        ; Transition to NextBlock to read next block header
-        REP #$20
-        LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
-        PLB
-        RTS
-
-    ; ---- State: EofWait ----
-    ; After sending EOF marker (dest=$0000 + $00BB), wait for SPC to acknowledge with $11CC.
-    ; SPC sees dest=$0000, writes $CC to $F6, then clears ports and returns to music engine.
-    .StateEofWait:
-        REP #$20
-        LDA $2142 : CMP #$11CC : BNE .EwNotReady
-
-        ; SPC acknowledged EOF. Transition to Complete.
-        LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState
-        JMP .StateComplete                      ; execute immediately
-    .EwNotReady:
-        RTS
-
-    ; ---- State: Complete ----
-    ; Upload finished. Clear flags, set state to idle.
-    .StateComplete:
-        REP #$20
-        LDA #$0000
-        STA $0617                               ; clear "uploading to APU" flag
-        STA !RamAsyncSpcState                   ; state = idle (0)
-        RTS
-
-    ; ---- Helper: Increment source bank (Y wrapped to $8000) ----
-    ; Same as vanilla $80:8107 and practice hack's cm_spc_inc_bank.
-    ; Called when Y overflows past $FFFF. Sets Y=$8000, increments bank.
-    ; IMPORTANT: Called from both 8-bit and 16-bit A contexts (.StateNextBlock uses 16-bit,
-    ; .StateTransfer uses 8-bit). We must use 8-bit internally for the PHA/PLB/PLA sequence
-    ; because PLB always pulls exactly 1 byte regardless of the M flag.
-    .IncBank:
-        PHP                                     ; save processor state (including M flag)
-        SEP #$20                                ; force 8-bit A
-        PHA
-        LDA !RamAsyncSpcDataBank : INC : STA !RamAsyncSpcDataBank
-        PHA : PLB                               ; DB = new bank (1-byte push, 1-byte pull — balanced)
-        PLA
-        PLP                                     ; restore original processor state
-        LDY #$8000
-        RTS
-
-    ; ---- Guard: sound handler call ($82:896E hijack) ----
-    ; Called via JSL from $82:896E (replaces JSL $8289EF in the main game loop).
-    ; The sound handler writes to APU IO ports $2141-$2143 in multiple paths:
-    ;   - BRANCH_DOWNTIME: STZ $2141 / STZ $2142 / STZ $2143 (every frame during downtime)
-    ;   - Sound states 0-4: STA $2141,x (queued sound effect commands)
-    ; During async SPC upload, ANY write to IO 1-3 corrupts the transfer protocol.
-    ; When $0617 != 0 (upload active), skip the sound handler entirely.
-    ; When $0617 == 0, call the original sound handler normally.
-    .SoundHandlerGuard:
-        PHP
-        REP #$20
-        LDA $0617 : BNE .ShgSkip
-        PLP
-        JSL $8289EF                             ; call original sound handler
-        RTL
-    .ShgSkip:
-        PLP
-        RTL                                     ; skip sound handler — return to $82:8972
-
-    ; ---- Guard: music queue handler ($808F0C hijack) ----
-    ; Called via JSL from $808F0D (after the PHP at $808F0C which is kept in-place).
-    ; The hijack replaces REP #$20 + DEC $063F. The original PHP has already executed,
-    ; so P is on the stack (matching the PLP at $8F16/$8F49 in the original function).
-    ; If $0617 != 0 (async upload active), skip the ENTIRE music queue handler.
-    ; If $0617 == 0, execute the overwritten instructions and return to $8F12.
-    ;
-    ; CRITICAL: The N/Z flags from DEC $063F must be preserved through RTL, because
-    ; $8F12 (BMI) and $8F14 (BEQ) branch based on those flags. No PHP/PLP around the
-    ; check — we do REP #$20 unconditionally (same as the original code) and use a
-    ; non-flag-clobbering approach to test $0617.
-    .MusicQueueGuard:
-        REP #$20                                ; 16-bit A (same as original REP #$20 at $8F0D)
-        LDA $0617 : BNE .MqgSkip
-
-        ; No upload in progress — execute DEC $063F (the other overwritten instruction).
-        ; N/Z flags from DEC are preserved through RTL back to $8F12.
-        DEC $063F
-        RTL                                     ; return to $8F12 (BMI checks N flag from DEC)
-
-    .MqgSkip:
-        ; Upload in progress — skip the ENTIRE music queue handler.
-        ; Stack right now (top to bottom):
-        ;   [3 bytes] return addr → $808F11 (from JSL at $808F0D)
-        ;   [1 byte]  P from the vanilla PHP at $808F0C (the caller's original P)
-        ;   [3 bytes] return addr → caller of $808F0C (outer return addr)
+        ; ---- Pre-upload hook: called from $80:8F72 hijack (replaces LDA $8FE7E1,x) ----
+        ; Context: called from BRANCH_MUSIC_DATA in the music queue handler.
+        ; A is 16-bit (REP #$20 at $8F70). X = music data index (16-bit).
         ;
-        ; To skip cleanly: discard the inner return addr, restore the vanilla P (so the
-        ; caller sees its original P state — critical: M must match what the caller had,
-        ; otherwise the caller's subsequent instructions decode with the wrong width),
-        ; then RTL to return to the outer caller.
+        ; Vanilla code flow at this point:
+        ;   $8F72: LDA $8FE7E1,x  ← we hijack this (4 bytes, exact replacement)
+        ;   $8F76: STA $00         ← sets up source pointer low
+        ;   $8F78: LDA $8FE7E2,x  ← loads source pointer high + bank
+        ;   $8F7C: STA $01         ← sets up source pointer high + bank
+        ;   $8F7E: JSL $808024     ← total's patch replaced this with jsl fast_spc_init_long
+        ;   $8F82: SEP #$20        ← post-upload code continues here
         ;
-        ; CRITICAL: vanilla's $808F0C always exits via PLP+RTL, so the caller expects
-        ; its original P restored. Any caller (NMI wait at $80:A136, message box at
-        ; $85:85A1, etc.) breaks if we leave the M flag in the wrong state. The original
-        ; bug here was PLA'ing the vanilla PHP instead of PLP'ing it, leaving the caller
-        ; with M=1 from our SEP #$20 and causing misdecoded instructions (BRK crash at
-        ; $85:85B3 when grabbing items while async upload was still in progress).
-        SEP #$20                                ; force 8-bit A so PLA pulls 1 byte each
-        PLA : PLA : PLA                         ; discard 3-byte inner return addr (→ $808F11)
-        PLP                                     ; restore caller's P state from vanilla PHP
-        RTL                                     ; return to outer caller (any caller, not just $80:A13A)
+        ; For door transitions: we execute $8F72-$8F7D internally, start async upload,
+        ;   then adjust the return address to skip $8F7E and land at $8F82.
+        ; For non-door transitions: we execute the replaced LDA and return to $8F76,
+        ;   letting execution flow naturally into $8F7E (total's fast blocking upload).
+        .PreUploadHook:
+            ; Execute the replaced instruction
+            LDA $8FE7E1,x
 
-        .freespace
+            ; Check if we should use async upload (door transition, game state $09-$0B)
+            PHA                                     ; save A (needed for STA $00 at $8F76 if vanilla path)
+            LDA !RamGameState
+            CMP #$0009 : BCC .PuhVanilla            ; < $09: not door transition
+            CMP #$000C : BCS .PuhVanilla            ; >= $0C: not door transition
+            LDA !RamAsyncSpcState : BNE .PuhVanilla ; already active — let blocking handle it
+            PLA                                     ; restore A (source pointer low bytes)
+
+            ; --- Door transition: start async upload ---
+
+            ; Execute the instructions we're skipping over ($8F76-$8F7D):
+            STA $00                                 ; $8F76: STA $00
+            LDA $8FE7E2,x                          ; $8F78: LDA $8FE7E2,x
+            STA $01                                 ; $8F7C: STA $01
+            ; DP $00-$02 now has the source pointer, same as vanilla reaching $8F7E.
+
+            ; Start async state machine
+            PHP
+            REP #$30
+            LDA $00 : STA !RamAsyncSpcDataY         ; save source pointer Y
+            SEP #$20
+            LDA $02 : STA !RamAsyncSpcDataBank      ; save source bank
+
+            ; Set uploading flag (prevents music queue handler and sound handler from touching APU ports)
+            REP #$20
+            LDA #$FFFF : STA $0617
+
+            ; Send $FE to APU IO 0 to request fast upload mode (total's protocol)
+            SEP #$20
+            LDA #$FE : STA $002140                  ; long addr: DB may not be bank $00/$80
+
+            ; Set initial state: wait for SPC to respond with $11AA on IO 2-3
+            REP #$20
+            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+            PLP
+
+            ; Skip $8F76-$8F7E by adjusting the return address on the stack.
+            ; JSL at $8F72 pushed return addr $8F75 (RTL goes to $8F76).
+            ; We want RTL to go to $8F82 instead → set return addr to $8F81 (RTL adds 1).
+            ; Stack: S+1=PCL($75), S+2=PCH($8F), S+3=PBR($80)
+            SEP #$20
+            LDA #$81 : STA $01,s                   ; PCL = $81 → RTL returns to $8F82
+            RTL
+
+        .PuhVanilla:
+            ; Not a door transition (or async already active).
+            ; Restore A (the LDA $8FE7E1,x result) and return to $8F76.
+            ; Normal flow continues: STA $00, LDA, STA $01, then $8F7E (total's upload).
+            PLA
+            RTL
+
+        ; ---- Early start hook: hijack entry point for $82:E37F ----
+        ; Vanilla $82:E37F is `JSL $8882C1` (Initialise special effects for new room). Our hijack
+        ; replaces that JSL with `JSL AsyncSpcUpload_EarlyStartHook`, which first executes the
+        ; replaced instruction and then tail-jumps into .EarlyStart. The tail jump is safe because
+        ; .EarlyStart's final RTL will return to the caller of this hook (= the caller of the
+        ; vanilla $82:E37F instruction = door transition function $82:E36E).
+        .EarlyStartHook:
+            JSL $8882C1                             ; execute the replaced instruction
+            JMP .EarlyStart                         ; tail call: .EarlyStart RTLs for us
+
+        ; ---- Early start: kick off async upload the instant $07CB is known ----
+        ; Called from the $82:E37F hijack wrapper, immediately after $JSR $DEF2 (state header load)
+        ; has set $07CB = new room's music data index. At this point we're inside door transition
+        ; function $82:E36E, game state = $0B, and screen is fully faded to black.
+        ;
+        ; Vanilla flow otherwise: $82:E071 is called at $82:E4AD (much later), which queues music
+        ; stop + music data into $0619/$0629 via $808FC1. Each queue entry sets an 8-frame timer,
+        ; so the actual `LDA $8FE7E1,x` hook doesn't fire for ~16 frames AFTER $E4AD. Net delay
+        ; from "touched door" to "old music stops playing" is ~50-70 frames.
+        ;
+        ; With this hook, we bypass the music queue entirely and start our async state machine
+        ; directly from the $8F:E7E1 pointer table. We also update $07F3 = $07CB so the later
+        ; $82:E071 call at $E4AD becomes a no-op (its `CMP $07F3 : BEQ return` check fires).
+        ;
+        ; Music-stop sequencing: we do NOT send $FE immediately. Vanilla's music queue path imposes
+        ; an 8-frame delay between "stop music" ($00) and "upload data" because each $808FC1 call
+        ; primes an 8-frame queue timer. The gap gives the SPC music engine time to read $00 from
+        ; IO 0, process it through dispatch, and key-off any sustaining DSP voices before we start
+        ; overwriting ARAM. Without this gap, the DSP keeps playing the last-loaded samples until
+        ; we clobber them mid-note, producing stuck notes and sample-swap glitches.
+        ;
+        ; We match vanilla timing: write $00 to IO 0 here, capture $05B8 + !MusicStopWaitFrames as
+        ; the target frame, and transition to .StateStopWait. StateStopWait polls $05B8 from the
+        ; pump loop and, once the target is reached, writes $FE and transitions to .StateInit.
+        ;
+        ; Preconditions on entry:
+        ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
+        ;   - P state is whatever $82:E36E was in — we PHP/PLP to restore
+        ; Postconditions:
+        ;   - If $07CB == 0 or $07CB == $07F3 (no music change): no-op
+        ;   - If already uploading (!RamAsyncSpcState != 0): no-op
+        ;   - Otherwise: "stop music" queued to SPC, $0617 set, $07F3 updated, state = StopWait
+        .EarlyStart:
+            PHP
+            PHB
+            REP #$30
+            PHX
+
+            ; Skip if async upload already in progress (e.g., re-entry, or door asm ran twice)
+            LDA !RamAsyncSpcState : BNE .EsReturn
+
+            ; Load new room's music data index ($07CB is set by $82:DEF2).
+            ; Vanilla $82:DF3B-$DF3E masks with #$00FF and stores as 16-bit, so $07CC = 0 — a
+            ; plain 16-bit read gives the value directly.
+            LDA $07CB : BEQ .EsReturn               ; if index = 0: no music → skip
+            CMP $07F3 : BEQ .EsReturn               ; if same as current music data: no change → skip
+
+            ; New room's music differs. Start async upload immediately.
+            ; Update $07F3 so the later $82:E071 at $E4AD sees "no change" and becomes a no-op.
+            STA $07F3
+
+            ; Fetch source pointer from the music data pointer table at $8F:E7E1.
+            ; Table entries are 3 bytes each (24-bit pointers); the music data index in $07CB
+            ; is a pre-multiplied byte offset (0, 3, 6, 9, ...).
+            ; DB may be $82 here, so temporarily set DB = $8F for the table access.
+            TAX                                     ; X = music data index (byte offset)
+            PHB
+            PEA $8F8F : PLB : PLB                   ; DB = $8F
+            LDA $E7E1,x                             ; 16-bit: low 2 bytes of 3-byte pointer = offset
+            STA !RamAsyncSpcDataY                   ; save source offset (low 16 bits)
+            SEP #$20
+            LDA $E7E3,x                             ; 8-bit: 3rd byte of pointer = bank
+            STA !RamAsyncSpcDataBank                ; save source bank
+            LDA #$FF : STA $064C                    ; current music track = $FF (match $80:8F6D)
+
+            ; Mirror vanilla "stop track" queue side-effect: clear $07F5/$07F6 (current music track index).
+            ; Vanilla's $82:E071 path queues a track-0 entry, which the queue handler at $80:8F18-8F2A
+            ; processes by writing 0 to $07F5, $07F6, $2140 — i.e. it clears the SNES-side "current
+            ; track" tracking as well as sending the stop byte. We send $00 to $2140 directly (below)
+            ; without going through the queue, so we must replicate the $07F5 clear ourselves.
+            ; Without this, $82:E0D5 (called from our $82:E664 replacement after the upload finishes)
+            ; sees $07F5 == new room's $07C9 whenever the new room reuses the same track number as the
+            ; previous room (very common — most rooms use track 1) and returns early without queuing
+            ; the new track, leaving the room silent. Use 16-bit STZ so $07F5+$07F6 are both cleared,
+            ; matching vanilla's $80:8F21/$8F24 STA/STZ pair.
+            REP #$20                                ; 16-bit A for the dual STZ below (and for $05B8 read)
+            STZ $07F5                               ; current music track index = 0 (clears both $07F5 and $07F6)
+
+            ; Stage 1: send "stop music" ($00) to IO 0 and arm the StopWait countdown.
+            ; The SPC music engine's dispatch loop will see $00 on IO 0, interpret it as a music
+            ; track index of 0, and kill the current song. We then wait !MusicStopWaitFrames frames
+            ; (matching vanilla's $808FC1 timer) before sending $FE to request fast upload mode.
+            SEP #$20
+            LDA #$00 : STA $002140                  ; IO 0 = $00 (stop music command)
+            REP #$20                                ; 16-bit A for 16-bit NMI counter
+            LDA $05B8                               ; current 16-bit NMI counter (WRAM mirror at DB=$8F)
+            CLC : ADC.w #!MusicStopWaitFrames       ; target = now + wait (16-bit wrap OK, compared signed in StateStopWait).
+                                                    ;   .w suffix is REQUIRED — asar's immediate-size heuristic uses the hex
+                                                    ;   digit count of the literal, not the M flag, so a 2-digit value like
+                                                    ;   $08 would otherwise be emitted as an 8-bit immediate (2 bytes), causing
+                                                    ;   the next instruction's opcode byte to be consumed as the high byte of
+                                                    ;   the immediate at runtime — silently dropping the STA below.
+            STA !RamAsyncSpcStopWaitTarget          ; save target (full 16-bit)
+            PLB                                     ; restore DB
+
+            ; Set uploading flag (guards sound handler / music queue handler from APU port writes).
+            ; Must be set BEFORE returning so that the sound handler, which runs later in the same
+            ; frame at $82:896E, skips itself and doesn't stomp our $00 write to IO 0.
+            LDA #$FFFF : STA $0617
+
+            ; Initial state: StopWait (countdown, then send $FE and transition to Init).
+            LDA #!AsyncSpcStateStopWait : STA !RamAsyncSpcState
+
+        .EsReturn:
+            PLX
+            PLB
+            PLP
+            RTL
+
+        ; ---- Pump wrapper for scroll wait loop ($82:E526 hijack) ----
+        ; Vanilla: LDA $0931 / BPL $FB (tight busy loop)
+        ; We replace the entire loop: pump SPC bytes, check $0931, repeat internally until done.
+        ; The loop lives HERE so we never re-enter the JSL and never leak stack frames.
+        .ScrollWaitPump:
+            PHP
+        .ScrollWaitLoop:
+            REP #$20
+            JSR .Dispatch
+            REP #$20                                ; ensure 16-bit A after Dispatch (state handlers may leave M=1)
+            LDA $0931                               ; 16-bit load — vanilla checks bit 15 ($8000 = done)
+            BPL .ScrollWaitLoop                     ; tight poll until bit 15 set (same as vanilla BPL $FB)
+            PLP
+            RTL                                     ; return to $82:E52B (after the hijacked 5 bytes)
+
+        ; ---- Pump wrapper for NMI-wait loop ($80:8343 hijack) ----
+        ; Vanilla: LDA $05B4 / BNE $FB (tight busy loop)
+        ; Same fix: loop internally so we never re-enter the JSL.
+        .NmiWaitPump:
+            PHP
+        .NmiWaitLoop:
+            REP #$20
+            JSR .Dispatch
+            SEP #$20
+            LDA $05B4                               ; check NMI request flag
+            BNE .NmiWaitLoop                        ; tight poll — no WAI (same race condition risk)
+            PLP
+            RTL                                     ; return to $80:8348 (after the hijacked 5 bytes)
+
+        ; ---- Dispatch: call current state handler if active ----
+        ; Called via JSR with 16-bit A. X/Y size may vary (8-bit from NMI-wait, 16-bit from scroll-wait).
+        ; We force 16-bit X/Y before push/pop to ensure stack balance regardless of caller state.
+        .Dispatch:
+            LDA !RamAsyncSpcState : BEQ .DispatchIdle
+
+            ; Game-state guard: only dispatch during game states where our upload can legitimately
+            ; be active. NmiWaitPump ($80:8343 hijack) runs during ALL game states because $80:8338
+            ; is the universal "wait for NMI" routine. But our upload is only started during door
+            ; transitions ($09-$0B) and must complete before reaching main gameplay ($07-$08).
+            ; Outside this range — pause ($0C-$12), death ($13-$1A), ending ($27), etc. — our RAM
+            ; may be repurposed (e.g., $7F:F800-FFFF is the ending blank tilemap) and reading
+            ; !RamAsyncSpcState would return garbage, crashing the game via the jump table.
+            ; Mirrors the PreUploadHook's game state check at .PuhVanilla.
+            LDA !RamGameState
+            CMP #$0007 : BCC .DispatchIdle          ; < $07: title/intro states — skip
+            CMP #$000C : BCC .DispatchOk            ; $07-$0B: gameplay + door transition — proceed
+            ; >= $0C: pause, death, ending, etc. — skip
+        .DispatchIdle:
+            RTS
+
+        .DispatchOk:
+            ; Bounds check: if state > max valid entry, RAM has been corrupted by external code.
+            ; Force-recover to idle so a corrupt state can never index past the jump table.
+            LDA !RamAsyncSpcState
+            CMP #!AsyncSpcStateStopWait+2           ; compare against first INVALID state index
+            BCS .DispatchCorrupt
+
+            REP #$30                                ; force 16-bit A AND X/Y before push (critical for stack balance!)
+            PHX : PHY : PHB
+            PHK : PLB                               ; DB = code bank (for jump table)
+            TAX                                     ; X = state number (16-bit, pre-multiplied by 2)
+            JSR (.JumpTable,x)
+            REP #$10                                ; ensure 16-bit X/Y for pop (state handlers may have changed it)
+            PLB : PLY : PLX
+            RTS
+
+        .DispatchCorrupt:
+            ; State is outside valid range — external write stomped our RAM.
+            ; Force everything back to idle. Upload is lost but the game stays alive.
+            LDA #$0000
+            STA !RamAsyncSpcState                   ; state = idle
+            STA $0617                               ; clear upload flag (unblock music queue + sound handler)
+            RTS
+
+        .JumpTable:
+            dw $0000                                ; 0 = idle (should never be reached)
+            dw .StateInit                           ; 2 = Init
+            dw .StateNextBlock                      ; 4 = NextBlock
+            dw .StateBlockWait                      ; 6 = BlockWait
+            dw .StateTransfer                       ; 8 = Transfer
+            dw .StateEofWait                        ; 10 = EofWait
+            dw .StateComplete                       ; 12 = Complete
+            dw .StateStopWait                       ; 14 = StopWait (EarlyStart only)
+
+        ; ---- State: StopWait (EarlyStart only) ----
+        ; Entered from .EarlyStart after writing $00 (stop music) to IO 0 and arming
+        ; !RamAsyncSpcStopWaitTarget = ($05B8 at entry) + !MusicStopWaitFrames.
+        ;
+        ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
+        ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
+        ; clobber ARAM with fast upload data. Vanilla achieves the same effect via two back-to-
+        ; back $808FC1 calls, each priming an 8-frame music queue timer.
+        ;
+        ; Frame counter: $05B8 is the 16-bit NMI counter (incremented every NMI in BRANCH_RETURN
+        ; at $80:95F9, including via the BRANCH_LAG fall-through). We deliberately do NOT use
+        ; $05B5 — during door transitions an erroneous 16-bit write to $05B4 clobbers $05B5 to 0
+        ; every frame, so a wait against $05B5 can never be satisfied. $05B8 is the only frame-
+        ; like counter that advances reliably across door transitions. The state machine pump is
+        ; called many times per frame from .ScrollWaitPump / .NmiWaitPump loops, so we just poll
+        ; $05B8 each dispatch.
+        ;
+        ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
+        ; passed the target. This tolerates 16-bit wraparound as long as the wait is < 32768
+        ; frames (!MusicStopWaitFrames range $0001..$7FFF; default $0008).
+        ;
+        ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
+        ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
+        .StateStopWait:
+            REP #$20
+            LDA $05B8                               ; current 16-bit NMI counter
+            SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
+            BMI .SwWaiting                          ; if current < target (bit 15 set): still waiting
+
+            ; Wait satisfied. Kick off the fast upload.
+            SEP #$20
+            LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
+            REP #$20
+            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+            RTS
+        .SwWaiting:
+            RTS
+
+        ; ---- State: Init ----
+        ; Wait for SPC to respond with $11AA on IO 2-3.
+        ; We already sent $FE to IO 0 (from .Start directly, or from .StateStopWait after the
+        ; stop-wait countdown). The SPC music engine periodically checks IO 0 for commands;
+        ; when it sees $FE, total's command hook routes to the fast upload handler at ARAM
+        ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
+        .StateInit:
+            REP #$20
+            LDA $2142 : CMP #$11AA : BNE .InitNotReady
+
+            ; SPC is ready. Transition to NextBlock.
+            LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
+        .InitNotReady:
+            RTS
+
+        ; ---- State: NextBlock ----
+        ; Wait for $11AA on IO 2-3, then read block header and send to SPC.
+        ; Block header format in source data: 2-byte size + 2-byte dest address.
+        ; If size=0, this is the EOF marker — upload is finishing.
+        ;
+        ; Protocol (total's $FE):
+        ;   CPU sends dest addr to IO 0-1.
+        ;   CPU sends $00BB to IO 2-3 (tells SPC "address sent").
+        ;   SPC reads dest from $F4-$F5, writes $CC to $F6 (CPU sees $xxCC on IO 2-3).
+        ;   For EOF: CPU sends $0000 to IO 0-1 and $00BB to IO 2-3.
+        .StateNextBlock:
+            ; Wait for $11AA (SPC ready for a new block header).
+            ; First block: Init already confirmed $11AA, this re-check is instant.
+            ; Subsequent blocks: SPC re-enters fastspc after end-of-block, sets $11AA quickly.
+            REP #$20
+            LDA $2142 : CMP #$11AA : BNE .NbNotReady
+
+            SEP #$20
+            PHB
+            LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
+            REP #$30                                ; 16-bit A AND X/Y
+            LDA !RamAsyncSpcDataY : TAY             ; Y = source offset (16-bit)
+
+            ; Read block size (2 bytes)
+            LDA $0000,y
+            STA !RamAsyncSpcBlockSize
+            ; Advance Y past size field
+            INY : BNE +
+            JSR .IncBank
+        +   INY : BNE +
+            JSR .IncBank
+        +
+
+            ; Check for EOF (size == 0)
+            LDA !RamAsyncSpcBlockSize : BEQ .NbEof
+
+            ; Read destination address (2 bytes)
+            LDA $0000,y
+            STA $002140                             ; IO 0-1 = dest address (long addr: DB is source bank, not $00)
+            ; Advance Y past dest field
+            INY : BNE +
+            JSR .IncBank
+        +   INY : BNE +
+            JSR .IncBank
+        +
+
+            ; Save source pointer (now past the 4-byte header, pointing at data start)
+            TYA : STA !RamAsyncSpcDataY
+
+            ; Tell SPC: "address sent" ($00BB to IO 2-3)
+            LDA #$00BB : STA $002142                ; long addr: DB is source bank
+
+            ; Reset handshake counter for transfer
+            SEP #$20
+            LDA #$00 : STA !RamAsyncSpcIndex
+
+            ; Transition to BlockWait
+            REP #$20
+            LDA #!AsyncSpcStateBlockWait : STA !RamAsyncSpcState
+
+            PLB
+            RTS
+
+        .NbEof:
+            ; EOF block: size == 0. Source pointer is past the 2-byte size (no dest to read).
+            TYA : STA !RamAsyncSpcDataY
+
+            ; Send dest=$0000 to IO 0-1 (signals EOF to SPC)
+            LDA #$0000 : STA $002140                ; long addr: DB is source bank
+            ; Tell SPC: "address sent"
+            LDA #$00BB : STA $002142                ; long addr: DB is source bank
+
+            ; Transition to EofWait (wait for SPC to acknowledge with $11CC)
+            LDA #!AsyncSpcStateEofWait : STA !RamAsyncSpcState
+
+            PLB
+            RTS
+
+        .NbNotReady:
+            RTS
+
+        ; ---- State: BlockWait ----
+        ; Wait for SPC to acknowledge block header with $11CC on IO 2-3.
+        ; SPC reads dest from $F4-$F5, writes $CC to $F6. CPU sees $xxCC on IO 2-3.
+        ; After this, SPC enters .transfer and waits for the first data counter on $F6.
+        .StateBlockWait:
+            REP #$20
+            LDA $2142 : CMP #$11CC : BNE .BwWaiting
+
+            ; SPC acknowledged. Transition to Transfer.
+            LDA #!AsyncSpcStateTransfer : STA !RamAsyncSpcState
+        .BwWaiting:
+            RTS
+
+        ; ---- State: Transfer ----
+        ; Pump up to !AsyncSpcBytesPerPump bytes per call using total's 2-byte pair protocol.
+        ;
+        ; Protocol per pair:
+        ;   - Send 2 data bytes to IO 0-1 (16-bit write)
+        ;   - Send counter to IO 2 (IO 3 stays 0 during transfer; SPC checks IO 3 bit 0 for end)
+        ;   - Wait for SPC echo of counter at IO 2 (SPC writes Y to $F6 after processing)
+        ;
+        ; Counter sequence: 0 (first pair), then 1, 3, 5, 7, ... (increment by 2 after each pair)
+        ; The first pair after $11CC also waits for $11CC to confirm SPC is ready.
+        ;
+        ; End-of-block: instead of sending next counter, send (counter-1) to IO 2 and $01 to IO 3.
+        ; SPC sees bit 0 of $F7 ($2143) set → exits transfer, re-enters fastspc for next block.
+        ;
+        ; Register usage during pump loop:
+        ;   A (8-bit) = handshake counter (next value to send)
+        ;   X (16-bit) = bytes remaining in pump budget (counts down by 2)
+        ;   Y (16-bit) = source data pointer (into current bank via DB)
+        ;
+        ; NOTE: DP $00 is NOT used — NMI can fire mid-loop and clobber DP scratch.
+        .StateTransfer:
+            SEP #$20
+            PHB
+            LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
+            REP #$30                                ; 16-bit A AND X/Y
+            LDA !RamAsyncSpcDataY : TAY             ; Y = source (16-bit)
+
+            SEP #$20
+            LDA !RamAsyncSpcIndex                   ; A = counter (8-bit)
+            REP #$10                                ; ensure 16-bit X/Y
+            LDX #!AsyncSpcBytesPerPump              ; X = pump budget in bytes
+
+            CMP #$00 : BNE .TxPumpLoop             ; counter > 0 → mid-block, resume pumping
+
+            ; --- First pair of block ---
+            ; Wait for $11CC (SPC ready for data after acknowledging block header).
+            ; BlockWait already confirmed $11CC, so this should match instantly.
+            REP #$20
+        .TxWaitReady:
+            LDA $002142 : CMP #$11CC : BNE .TxWaitReady  ; long addr: DB is source bank
+
+            ; Load and send first 2 data bytes
+            LDA $0000,y : STA $002140               ; IO 0-1 = first 2 bytes of block data (long addr)
+            ; Send counter=0 to IO 2-3
+            LDA #$0000 : STA $002142                ; long addr (no STZ long opcode exists)
+            SEP #$20
+            LDA #$01                                ; counter becomes 1 (next to send)
+            ; Y is NOT advanced here — .TxPumpLoop does INY INY at the start
+            ; to advance past the previous pair before loading the next one
+            DEX : DEX                               ; budget -= 2
+            BEQ .TxChunkDone
+            ; Fall through to pump subsequent pairs
+
+        .TxPumpLoop:
+            ; A = counter (8-bit), X = budget (16-bit), Y = source (16-bit)
+            ; Advance Y past previous pair's data
+            INY : BNE +
+            JSR .IncBank
+        +   INY : BNE +
+            JSR .IncBank
+        +
+
+            ; Decrement block size by 2
+            PHA                                     ; save counter (8-bit → 1 byte on stack)
+            REP #$20
+            LDA !RamAsyncSpcBlockSize
+            SEC : SBC #$0002
+            STA !RamAsyncSpcBlockSize
+            BEQ .TxEndBlock                         ; size == 0 → even block end
+            CMP #$FFFF : BEQ .TxEndBlockOdd         ; size == -1 → odd block end
+            SEP #$20
+            PLA                                     ; restore counter
+
+            ; Wait for SPC echo of counter at IO 2
+            ; (SPC writes Y to $F6 after processing each pair; CPU reads $F6 from IO 2)
+            ; IO 3 ($F7) stays $00 during transfer (set by SPC's `mov $f7, #$00` at .transfer entry)
+        .TxWaitEcho:
+            CMP $002142 : BNE .TxWaitEcho           ; long addr: DB is source bank
+
+            ; Send next 2 data bytes
+            PHA                                     ; save counter (need 16-bit A for data load)
+            REP #$20
+            LDA $0000,y : STA $002140               ; IO 0-1 = data pair (long addr)
+            SEP #$20
+            PLA                                     ; restore counter
+            STA $002142                             ; IO 2 = counter (long addr; IO 3 stays 0 from first pair)
+
+            ; Advance counter by 2 (wraps at 256 via 8-bit arithmetic)
+            CLC : ADC #$02
+
+            DEX : DEX                               ; budget -= 2
+            BNE .TxPumpLoop
+            ; Fall through when budget exhausted
+
+        .TxChunkDone:
+            ; Save state for next pump call
+            STA !RamAsyncSpcIndex                   ; save counter
+            REP #$20
+            TYA : STA !RamAsyncSpcDataY             ; save source pointer
+            SEP #$20
+            PHB : PLA : STA !RamAsyncSpcDataBank    ; save bank (may have changed via .IncBank)
+            PLB                                     ; restore original DB
+            RTS
+
+        .TxEndBlock:                                ; A is 16-bit here, counter is on stack (8-bit push)
+            SEP #$20
+            PLA                                     ; restore counter
+            BRA .TxSendEnd
+
+        .TxEndBlockOdd:                             ; A is 16-bit here, counter is on stack
+            SEP #$20
+            PLA                                     ; restore counter
+            DEY                                     ; back up source by 1 byte (odd block had 1 extra advance)
+            ; Fall through to send end signal
+
+        .TxSendEnd:
+            ; A = counter (8-bit). Block is finished.
+            ; Wait for SPC echo of current counter (SPC processed last pair we sent)
+        .TxWaitFinalEcho:
+            CMP $002142 : BNE .TxWaitFinalEcho      ; long addr: DB is source bank
+
+            ; Send end-of-block signal:
+            ; IO 2 = counter - 1 (doesn't match any Y the SPC expects, so SPC falls to bbc0 check)
+            ; IO 3 = $01 (bit 0 set = end flag; SPC's `bbc0 $f7` test sees it and exits transfer)
+            DEC A : STA $002142                     ; IO 2 = counter - 1 (long addr)
+            LDA #$01 : STA $002143                  ; IO 3 = end flag (long addr)
+
+            ; Save source pointer and bank
+            REP #$20
+            TYA : STA !RamAsyncSpcDataY
+            SEP #$20
+            PHB : PLA : STA !RamAsyncSpcDataBank
+
+            ; Reset counter for next block
+            LDA #$00 : STA !RamAsyncSpcIndex
+
+            ; Transition to NextBlock to read next block header
+            REP #$20
+            LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
+            PLB
+            RTS
+
+        ; ---- State: EofWait ----
+        ; After sending EOF marker (dest=$0000 + $00BB), wait for SPC to acknowledge with $11CC.
+        ; SPC sees dest=$0000, writes $CC to $F6, then clears ports and returns to music engine.
+        .StateEofWait:
+            REP #$20
+            LDA $2142 : CMP #$11CC : BNE .EwNotReady
+
+            ; SPC acknowledged EOF. Transition to Complete.
+            LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState
+            JMP .StateComplete                      ; execute immediately
+        .EwNotReady:
+            RTS
+
+        ; ---- State: Complete ----
+        ; Upload finished. Clear flags, set state to idle.
+        .StateComplete:
+            REP #$20
+            LDA #$0000
+            STA $0617                               ; clear "uploading to APU" flag
+            STA !RamAsyncSpcState                   ; state = idle (0)
+            RTS
+
+        ; ---- Helper: Increment source bank (Y wrapped to $8000) ----
+        ; Same as vanilla $80:8107 and practice hack's cm_spc_inc_bank.
+        ; Called when Y overflows past $FFFF. Sets Y=$8000, increments bank.
+        ; IMPORTANT: Called from both 8-bit and 16-bit A contexts (.StateNextBlock uses 16-bit,
+        ; .StateTransfer uses 8-bit). We must use 8-bit internally for the PHA/PLB/PLA sequence
+        ; because PLB always pulls exactly 1 byte regardless of the M flag.
+        .IncBank:
+            PHP                                     ; save processor state (including M flag)
+            SEP #$20                                ; force 8-bit A
+            PHA
+            LDA !RamAsyncSpcDataBank : INC : STA !RamAsyncSpcDataBank
+            PHA : PLB                               ; DB = new bank (1-byte push, 1-byte pull — balanced)
+            PLA
+            PLP                                     ; restore original processor state
+            LDY #$8000
+            RTS
+
+        ; ---- Guard: sound handler call ($82:896E hijack) ----
+        ; Called via JSL from $82:896E (replaces JSL $8289EF in the main game loop).
+        ; The sound handler writes to APU IO ports $2141-$2143 in multiple paths:
+        ;   - BRANCH_DOWNTIME: STZ $2141 / STZ $2142 / STZ $2143 (every frame during downtime)
+        ;   - Sound states 0-4: STA $2141,x (queued sound effect commands)
+        ; During async SPC upload, ANY write to IO 1-3 corrupts the transfer protocol.
+        ; When $0617 != 0 (upload active), skip the sound handler entirely.
+        ; When $0617 == 0, call the original sound handler normally.
+        .SoundHandlerGuard:
+            PHP
+            REP #$20
+            LDA $0617 : BNE .ShgSkip
+            PLP
+            JSL $8289EF                             ; call original sound handler
+            RTL
+        .ShgSkip:
+            PLP
+            RTL                                     ; skip sound handler — return to $82:8972
+
+        ; ---- Guard: music queue handler ($808F0C hijack) ----
+        ; Called via JSL from $808F0D (after the PHP at $808F0C which is kept in-place).
+        ; The hijack replaces REP #$20 + DEC $063F. The original PHP has already executed,
+        ; so P is on the stack (matching the PLP at $8F16/$8F49 in the original function).
+        ; If $0617 != 0 (async upload active), skip the ENTIRE music queue handler.
+        ; If $0617 == 0, execute the overwritten instructions and return to $8F12.
+        ;
+        ; CRITICAL: The N/Z flags from DEC $063F must be preserved through RTL, because
+        ; $8F12 (BMI) and $8F14 (BEQ) branch based on those flags. No PHP/PLP around the
+        ; check — we do REP #$20 unconditionally (same as the original code) and use a
+        ; non-flag-clobbering approach to test $0617.
+        .MusicQueueGuard:
+            REP #$20                                ; 16-bit A (same as original REP #$20 at $8F0D)
+            LDA $0617 : BNE .MqgSkip
+
+            ; No upload in progress — execute DEC $063F (the other overwritten instruction).
+            ; N/Z flags from DEC are preserved through RTL back to $8F12.
+            DEC $063F
+            RTL                                     ; return to $8F12 (BMI checks N flag from DEC)
+
+        .MqgSkip:
+            ; Upload in progress — skip the ENTIRE music queue handler.
+            ; Stack right now (top to bottom):
+            ;   [3 bytes] return addr → $808F11 (from JSL at $808F0D)
+            ;   [1 byte]  P from the vanilla PHP at $808F0C (the caller's original P)
+            ;   [3 bytes] return addr → caller of $808F0C (outer return addr)
+            ;
+            ; To skip cleanly: discard the inner return addr, restore the vanilla P (so the
+            ; caller sees its original P state — critical: M must match what the caller had,
+            ; otherwise the caller's subsequent instructions decode with the wrong width),
+            ; then RTL to return to the outer caller.
+            ;
+            ; CRITICAL: vanilla's $808F0C always exits via PLP+RTL, so the caller expects
+            ; its original P restored. Any caller (NMI wait at $80:A136, message box at
+            ; $85:85A1, etc.) breaks if we leave the M flag in the wrong state. The original
+            ; bug here was PLA'ing the vanilla PHP instead of PLP'ing it, leaving the caller
+            ; with M=1 from our SEP #$20 and causing misdecoded instructions (BRK crash at
+            ; $85:85B3 when grabbing items while async upload was still in progress).
+            SEP #$20                                ; force 8-bit A so PLA pulls 1 byte each
+            PLA : PLA : PLA                         ; discard 3-byte inner return addr (→ $808F11)
+            PLP                                     ; restore caller's P state from vanilla PHP
+            RTL                                     ; return to outer caller (any caller, not just $80:A13A)
+
+            .freespace
     }
     !FreespaceAnywhere := AsyncSpcUpload_freespace
     warnpc !FreespaceAnywhereEnd
-
-    org !Freespace80
-    CheckIfVramUpdateNeeded: {
-        .vertical
-        ..topOfScreen
-            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BPL ++
-            JSR $9632 ; Door tube is low - execute VRAM update now. (Caller already checked if it's needed.)
-        ++  RTS
-        ..bottomOfScreen
-            PHA ; need to preserve A here due to the routine we hijacked
-            LDA !RamDoorDirection : BIT #$0002 : BEQ ++ ; If not vertical transition: return.
-            LDA !RamLayer1YPosition : BMI + : AND #$00FF : + : CMP #$0090 : BMI ++
-            ; Door tube is high - execute VRAM update now if needed.
-            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
-        ++  PLA
-            LDY #$0000 ; instruction replaced by hijack
-            RTS
-
-        .horizontal
-        ..topOfScreen
-            LDA !RamDoorDirection : BIT #$0002 : BNE ++ ; If vertical transition: return.
-            JSR ..compareYPosition : BMI ++
-            ; Door is low - move down if needed.
-            LDX !RamDoorVramUpdateFlag : BPL ++ : JSR $9632
-        ++  LDA $0931 ; instruction replaced by hijack (was $9031 - typo)
-            RTS
-        ..bottomOfScreen
-            ; This hijack replaces vanilla's unconditional `JSR $9632` at $80:980F (IRQ command $1A).
-            ; Vanilla's command $1A is the ONLY place $05BC gets cleared in the horizontal IRQ cycle.
-            ; During early room loading (BEFORE the scroll wait at $82:E526), for UP doors
-            ; $82:E3FB sets the interrupt command to $16 (horizontal cycle) - only DOWN doors use
-            ; the vertical cycle during phase 1. $82:E49D only later switches UP doors to vertical.
-            ; So during phase 1, the $82:E06B wait loops at $E446/E450/E45A/E474/E488 rely on the
-            ; HORIZONTAL IRQ handlers to clear $05BC, even for UP doors.
-            ; If we skip on vertical direction, $05BC never clears → softlock at $82:E06B.
-            ; Fix: match vanilla behavior (unconditional $9632) for non-horizontal directions.
-            LDA !RamDoorDirection : BIT #$0002 : BNE +  ; If vertical transition: fall through to unconditional $9632 (match vanilla).
-            JSR ..compareYPosition : BPL ++             ; Else horizontal: only if door is high (else delay to next frame).
-        +   JSR $9632 ; Execute VRAM update now. (Caller already checked that $05BC bit 15 is set.)
-        ++  RTS
-
-        ..compareYPosition
-            LDA !RamLayer1YPosition : SEC : SBC !RamLayer1YDestination
-            PHA : LDA !RamHDoorTopBlockYPosition : SEC : SBC $01,s : PLX : CMP #$0060
-            RTS
-
-        .freespace
-    }
-    !Freespace80 := CheckIfVramUpdateNeeded_freespace
-    warnpc !Freespace80End
+    endif
 }
 
 ; ========================================================
