@@ -19,7 +19,10 @@ math pri on
 
 ; This patch was also made possible by:
 ;  * P.JBoy  - Keeper of the commented Super Metroid bank logs, without which this patch would not have been possible. https://patrickjohnston.org/bank/index.html
+;              Also maintains RAM map, SPC engin documentation which were also used.
 ;  * Tundain - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
+;  * NobodyNada and the SM Practice hack dev team - particularly the quickboot SPC code they wrote which was used as a reference: https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283
+;  * total   - His SM SPC engine optimization for faster uploads is used by this patch.
 
 ; Other patches you should use that were tested with this, that have no conflicts and work out of the box:
 ;  * Decompression Optimization by Kejardon, with bugfix from Maddo - Included in this patch
@@ -132,10 +135,11 @@ math pri on
     !WaitForMusicUploadBeforeFadeIn = 1   ; Block the door transition fade-in until the async music upload has fully completed.
                                           ;     0: Fade in immediately after queue clears (may result in silent main gameplay until music loading completes).
                                           ;     1: Wait for async upload completion before fade-in (audio and visuals stay in sync).
-    !MusicStopWaitFrames            = $08 ; Frames to wait between sending "stop music" ($00) and "start fast upload" ($FE) in EarlyStart.
+    !MusicStopWaitFrames            = $08 ; Frames to wait between sending "stop music" ($00) and "start fast upload" ($FE) in InitializeEarlyStartUpload.
                                           ;     Audio glitches can occur if this is too low, as the old music is mid-note and does not have time to stop playing while new music data loads.
                                           ;     Only used when !EarlyMusicUpload = 1; otherwise vanilla code naturally has the 8 frame wait.
                                           ;     Range: $0001..$7FFF (signed 16-bit delta). $08 matches vanilla timing.
+    !AsyncSpcBytesPerTransfer     = $0040 ; 64d bytes per transfer call
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
@@ -225,12 +229,12 @@ math pri on
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
-    !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; State number (0=idle, else state handler address)
-    !RamAsyncSpcDataY                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source pointer (Y register into bank)
+    !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; State number (0=idle, else active state index x 2)
+    !RamAsyncSpcDataY                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source pointer into bank
     !RamAsyncSpcDataBank                         := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source bank (low byte used, stored as word for convenience)
     !RamAsyncSpcBlockSize                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Remaining bytes in current block
     !RamAsyncSpcIndex                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current handshake counter byte (low byte used)
-    !RamAsyncSpcStopWaitTarget                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; EarlyStart stop-wait: target value of !RamNmiCounter at which StateStopWait sends $FE
+    !RamAsyncSpcStopWaitTarget                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; InitializeEarlyStartUpload stop-wait: target value of !RamNmiCounter at which StateStopWait sends $FE
     !RamEnd                                      := !CurRamAddr
 
     ; note/todo: we can use 092b and 092d if we just stop the game from setting them
@@ -1348,16 +1352,12 @@ if !AsyncMusicUploadEnabled > 0
         ;     the later part of the process where it happens in vanilla.
         ; This causes the vanilla call at $82E4AD to effectively become a no-op.
         org $82E37F
-            JSL AsyncSpcUpload_EarlyStartHook
+            JSL AsyncSpcUpload_InitializeEarlyStartUpload
     endif
 
     if !WaitForMusicUploadBeforeFadeIn
         ; The vanilla check for this at $82E664 no longer works because our code immediately clears the music queue entry.
-
-        ; Fix: replace $82:E664's body in place, inserting an additional check on !RamAsyncSpcState.
-        ; Original body is 17 bytes ($E664..$E674 inclusive). The replacement is slightly longer, so
-        ; we extend into the space currently occupied by the unused door transition function at
-        ; $82:E675 (which is 45 bytes of dead code - verified unused per PJBoy's notes).
+        ; Insert an additional check on !RamAsyncSpcState. Extend into unused vanilla code.
         org $82E664
             JSL $808EF4 : BCS +                     ; if music is queued: return
             LDA !RamAsyncSpcState : BNE +           ; if async upload state is active: return (aka wait next frame)
@@ -1384,25 +1384,8 @@ if !AsyncMusicUploadEnabled > 0
     ; It also has a command hook at ARAM $17A1 that routes $FF to vanilla, $FE to fast.
     ; SPC has NO timeout between bytes - it waits indefinitely, so multi-frame is safe.
     ;
-    ; RAM used (all in bank $7F, accessed via absolute long):
-    ;   !RamAsyncSpcState     = state number (0=idle, else active state × 2)
-    ;   !RamAsyncSpcDataY     = source pointer Y (into current bank)
-    ;   !RamAsyncSpcDataBank  = source bank (low byte used)
-    ;   !RamAsyncSpcBlockSize = remaining bytes in current block
-    ;   !RamAsyncSpcIndex     = handshake counter (low byte used)
-    ;
-    ; State numbers (×2 for jump table indexing):
-    ;   0  = idle
-    ;   2  = Init (send $FE, wait for $11AA)
-    ;   4  = NextBlock (wait $11AA, read header, send dest + $00BB)
-    ;   6  = BlockWait (wait for $11CC)
-    ;   8  = Transfer (transfer 2-byte pairs, up to 64 bytes per call)
-    ;   10 = EofWait (wait for $11CC after EOF)
-    ;   12 = Complete (clear flags, go idle)
-    ;   14 = StopWait
-
-    !AsyncSpcBytesPerTransfer = $0040               ; 64 bytes per transfer call
-
+    ; See Variables/Constants section for ram usage (variables starting with "RamAsyncSpc")
+    ; See JumpTable for states.
     !AsyncSpcStateIdle      = $0000
     !AsyncSpcStateInit      = $0002
     !AsyncSpcStateNextBlock = $0004
@@ -1410,7 +1393,7 @@ if !AsyncMusicUploadEnabled > 0
     !AsyncSpcStateTransfer  = $0008
     !AsyncSpcStateEofWait   = $000A
     !AsyncSpcStateComplete  = $000C
-    !AsyncSpcStateStopWait  = $000E             ; EarlyStart only: wait N frames after "stop music" ($00) before sending $FE
+    !AsyncSpcStateStopWait  = $000E
 
     org !FreespaceAnywhere
     AsyncSpcUpload: {
@@ -1450,10 +1433,7 @@ if !AsyncMusicUploadEnabled > 0
         ..VanillaApuUpload:
             PLA : RTL ; Not a door transition (or async already active).
 
-        .EarlyStartHook:
-            JSL $8882C1                             ; instruction replaced by hijack
-
-        ; ---- Early start: kick off async upload the instant !RamRoomMusicDataIndex is known from new room header ----
+        ; ---- InitializeEarlyStartUpload: kick off async upload the instant !RamRoomMusicDataIndex is known from new room header ----
         ; With this hook, we bypass the music queue entirely and start our async state machine
         ; directly from the MusicPointers pointer table. We also update !RamMusicDataIndex = !RamRoomMusicDataIndex so the later
         ; $82:E071 call at $E4AD becomes a no-op (its CMP !RamMusicDataIndex : BEQ return check fires).
@@ -1468,14 +1448,8 @@ if !AsyncMusicUploadEnabled > 0
         ; We match vanilla timing: write $00 to IO 0 here, capture !RamNmiCounter + !MusicStopWaitFrames as
         ; the target frame, and transition to .StateStopWait. StateStopWait polls !RamNmiCounter from the
         ; transfer loop and, once the target is reached, writes $FE and transitions to .StateInit.
-        ;
-        ; Preconditions on entry:
-        ;   - Called via JSL from the $82:E37F hijack wrapper (DB = $82 from JMP ($099C))
-        ;   - P state is whatever $82:E36E was in - we PHP/PLP to restore
-        ; Postconditions:
-        ;   - If !RamRoomMusicDataIndex == 0 or !RamRoomMusicDataIndex == !RamMusicDataIndex (no music change): no-op
-        ;   - If already uploading (!RamAsyncSpcState != 0): no-op
-        ;   - Otherwise: "stop music" queued to SPC, !RamUploadingToApuFlag set, !RamMusicDataIndex updated, state = StopWait
+        .InitializeEarlyStartUpload:
+            JSL $8882C1                             ; instruction replaced by hijack
             PHP : PHB : REP #$30 : PHX
 
             LDA !RamAsyncSpcState : BNE ..Return ; Skip if async upload already in progress
@@ -1575,51 +1549,13 @@ if !AsyncMusicUploadEnabled > 0
 
         .JumpTable:
             dw $0000                                ; 0 = idle (should never be reached)
-            dw .StateInit                           ; 2 = Init
-            dw .StateNextBlock                      ; 4 = NextBlock
-            dw .StateBlockWait                      ; 6 = BlockWait
-            dw .StateTransfer                       ; 8 = Transfer
-            dw .StateEofWait                        ; 10 = EofWait
-            dw .StateComplete                       ; 12 = Complete
-            dw .StateStopWait                       ; 14 = StopWait (EarlyStart only)
-
-        ; ---- State: StopWait (EarlyStart only) ----
-        ; Entered from .EarlyStart after writing $00 (stop music) to IO 0 and arming
-        ; !RamAsyncSpcStopWaitTarget = (!RamNmiCounter at entry) + !MusicStopWaitFrames.
-        ;
-        ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
-        ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
-        ; clobber ARAM with fast upload data. Vanilla achieves the same effect via two back-to-
-        ; back $808FC1 calls, each priming an 8-frame music queue timer.
-        ;
-        ; Frame counter: !RamNmiCounter is the 16-bit NMI counter (incremented every NMI in BRANCH_RETURN
-        ; at $80:95F9, including via the BRANCH_LAG fall-through). We deliberately do NOT use
-        ; $05B5 - during door transitions an erroneous 16-bit write to !RamNmiRequestFlag clobbers $05B5 to 0
-        ; every frame, so a wait against $05B5 can never be satisfied. !RamNmiCounter is the only frame-
-        ; like counter that advances reliably across door transitions. The state machine transfer is
-        ; called many times per frame from .ScrollWaitTransfer / .NmiWaitTransfer loops, so we just poll
-        ; !RamNmiCounter each dispatch.
-        ;
-        ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
-        ; passed the target. This tolerates 16-bit wraparound as long as the wait is < 32768
-        ; frames (!MusicStopWaitFrames range $0001..$7FFF; default $0008).
-        ;
-        ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
-        ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
-        .StateStopWait:
-            REP #$20
-            LDA !RamNmiCounter                      ; current 16-bit NMI counter
-            SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
-            BMI .SwWaiting                          ; if current < target (bit 15 set): still waiting
-
-            ; Wait satisfied. Kick off the fast upload.
-            SEP #$20
-            LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
-            REP #$20
-            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
-            RTS
-        .SwWaiting:
-            RTS
+            dw .StateInit                           ; 2 = Init (send $FE, wait for $11AA)
+            dw .StateNextBlock                      ; 4 = NextBlock (wait $11AA, read header, send dest + $00BB)
+            dw .StateBlockWait                      ; 6 = BlockWait (wait for $11CC)
+            dw .StateTransfer                       ; 8 = Transfer (transfer 2-byte pairs, up to 64 bytes per call)
+            dw .StateEofWait                        ; A = EofWait (wait for $11CC after EOF)
+            dw .StateComplete                       ; C = Complete (clear flags, go idle)
+            dw .StateStopWait                       ; E = StopWait (InitializeEarlyStartUpload only: wait N frames after "stop music" ($00) before sending $FE)
 
         ; ---- State: Init ----
         ; Wait for SPC to respond with $11AA on IO 2-3.
@@ -1629,11 +1565,9 @@ if !AsyncMusicUploadEnabled > 0
         ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
         .StateInit:
             REP #$20
-            LDA $2142 : CMP #$11AA : BNE .InitNotReady
-
-            ; SPC is ready. Transition to NextBlock.
+            LDA $2142 : CMP #$11AA : BNE ..NotReady
             LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
-        .InitNotReady:
+        ..NotReady:
             RTS
 
         ; ---- State: NextBlock ----
@@ -1651,70 +1585,38 @@ if !AsyncMusicUploadEnabled > 0
             ; First block: Init already confirmed $11AA, this re-check is instant.
             ; Subsequent blocks: SPC re-enters fastspc after end-of-block, sets $11AA quickly.
             REP #$20
-            LDA $2142 : CMP #$11AA : BNE .NbNotReady
-
+            LDA $2142 : CMP #$11AA : BNE ..Return   ; Not ready. Return.
             SEP #$20
             PHB
             LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
-            REP #$30                                ; 16-bit A AND X/Y
+            REP #$30
             LDA !RamAsyncSpcDataY : TAY             ; Y = source offset (16-bit)
-
-            ; Read block size (2 bytes)
-            LDA $0000,y
-            STA !RamAsyncSpcBlockSize
-            ; Advance Y past size field
-            INY : BNE +
-            JSR .IncBank
-        +   INY : BNE +
-            JSR .IncBank
-        +
-
-            ; Check for EOF (size == 0)
-            LDA !RamAsyncSpcBlockSize : BEQ .NbEof
-
-            ; Read destination address (2 bytes)
-            LDA $0000,y
-            STA $002140                             ; IO 0-1 = dest address (long addr: DB is source bank, not $00)
-            ; Advance Y past dest field
-            INY : BNE +
-            JSR .IncBank
-        +   INY : BNE +
-            JSR .IncBank
-        +
-
-            ; Save source pointer (now past the 4-byte header, pointing at data start)
-            TYA : STA !RamAsyncSpcDataY
-
-            ; Tell SPC: "address sent" ($00BB to IO 2-3)
-            LDA #$00BB : STA $002142                ; long addr: DB is source bank
-
-            ; Reset handshake counter for transfer
-            SEP #$20
-            LDA #$00 : STA !RamAsyncSpcIndex
-
-            ; Transition to BlockWait
+            LDA $0000,y                             ;) Read block size (2 bytes)
+            STA !RamAsyncSpcBlockSize               ;/
+            INY : BNE + : JSR .IncBank : +          ;) Advance Y past size field
+            INY : BNE + : JSR .IncBank : +          ;/
+            LDA !RamAsyncSpcBlockSize : BEQ ..Eof   ; Check for EOF (size == 0)
+            LDA $0000,y                             ;) Read destination address (2 bytes). IO 0-1 = dest address.
+            STA $002140                             ;/
+            INY : BNE + : JSR .IncBank : +          ;) Advance Y past dest field
+            INY : BNE + : JSR .IncBank : +          ;/
+            TYA : STA !RamAsyncSpcDataY             ; Save source pointer (now past the 4-byte header, pointing at data start)
+            LDA #$00BB : STA $002142                ; Tell SPC: "address sent" ($00BB to IO 2-3).
+            SEP #$20                                ;) Reset handshake counter for transfer
+            LDA #$00 : STA !RamAsyncSpcIndex        ;/
             REP #$20
             LDA #!AsyncSpcStateBlockWait : STA !RamAsyncSpcState
-
             PLB
+        ..Return
             RTS
 
-        .NbEof:
+        ..Eof:
             ; EOF block: size == 0. Source pointer is past the 2-byte size (no dest to read).
             TYA : STA !RamAsyncSpcDataY
-
-            ; Send dest=$0000 to IO 0-1 (signals EOF to SPC)
-            LDA #$0000 : STA $002140                ; long addr: DB is source bank
-            ; Tell SPC: "address sent"
-            LDA #$00BB : STA $002142                ; long addr: DB is source bank
-
-            ; Transition to EofWait (wait for SPC to acknowledge with $11CC)
-            LDA #!AsyncSpcStateEofWait : STA !RamAsyncSpcState
-
+            LDA #$0000 : STA $002140                           ; Send dest=$0000 to IO 0-1 (signals EOF to SPC)
+            LDA #$00BB : STA $002142                           ; Tell SPC: "address sent"
+            LDA #!AsyncSpcStateEofWait : STA !RamAsyncSpcState ; Transition to EofWait (wait for SPC to acknowledge with $11CC)
             PLB
-            RTS
-
-        .NbNotReady:
             RTS
 
         ; ---- State: BlockWait ----
@@ -1723,15 +1625,13 @@ if !AsyncMusicUploadEnabled > 0
         ; After this, SPC enters .transfer and waits for the first data counter on $F6.
         .StateBlockWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BNE .BwWaiting
-
-            ; SPC acknowledged. Transition to Transfer.
+            LDA $2142 : CMP #$11CC : BNE ..Waiting
             LDA #!AsyncSpcStateTransfer : STA !RamAsyncSpcState
-        .BwWaiting:
+        ..Waiting:
             RTS
 
         ; ---- State: Transfer ----
-        ; Transfer up to !AsyncSpcBytesPerTransfer bytes per call using total's 2-byte pair protocol.
+        ; Transfer up to one chunk of bytes per call using total's 2-byte pair protocol. (Chunk size = !AsyncSpcBytesPerTransfer)
         ;
         ; Protocol per pair:
         ;   - Send 2 data bytes to IO 0-1 (16-bit write)
@@ -1748,83 +1648,64 @@ if !AsyncMusicUploadEnabled > 0
         ;   A (8-bit) = handshake counter (next value to send)
         ;   X (16-bit) = bytes remaining in transfer budget (counts down by 2)
         ;   Y (16-bit) = source data pointer (into current bank via DB)
-        ;
-        ; NOTE: DP $00 is NOT used - NMI can fire mid-loop and clobber DP scratch.
         .StateTransfer:
             SEP #$20
             PHB
-            LDA !RamAsyncSpcDataBank : PHA : PLB    ; DB = source bank
-            REP #$30                                ; 16-bit A AND X/Y
-            LDA !RamAsyncSpcDataY : TAY             ; Y = source (16-bit)
-
-            SEP #$20
-            LDA !RamAsyncSpcIndex                   ; A = counter (8-bit)
-            REP #$10                                ; ensure 16-bit X/Y
-            LDX #!AsyncSpcBytesPerTransfer              ; X = transfer budget in bytes
-
-            CMP #$00 : BNE .TxTransferLoop             ; counter > 0 -> mid-block, resume transfering
+            LDA !RamAsyncSpcDataBank : PHA : PLB      ; DB = source bank
+            REP #$30 : LDA !RamAsyncSpcDataY : TAY    ; Y = source (16-bit)
+            SEP #$20 : LDA !RamAsyncSpcIndex          ; A = counter (8-bit)
+            REP #$10 : LDX #!AsyncSpcBytesPerTransfer ; ensure 16-bit X/Y. X = transfer budget in bytes
+            CMP #$00 : BNE ..TransferLoop             ; counter > 0 -> mid-block, resume transfering
 
             ; --- First pair of block ---
             ; Wait for $11CC (SPC ready for data after acknowledging block header).
             ; BlockWait already confirmed $11CC, so this should match instantly.
             REP #$20
-        .TxWaitReady:
-            LDA $002142 : CMP #$11CC : BNE .TxWaitReady  ; long addr: DB is source bank
+        -   LDA $002142 : CMP #$11CC : BNE -
 
             ; Load and send first 2 data bytes
-            LDA $0000,y : STA $002140               ; IO 0-1 = first 2 bytes of block data (long addr)
-            ; Send counter=0 to IO 2-3
-            LDA #$0000 : STA $002142                ; long addr (no STZ long opcode exists)
+            LDA $0000,y : STA $002140               ; IO 0-1 = first 2 bytes of block data
+            LDA #$0000 : STA $002142                ; Send counter=0 to IO 2-3 (no STZ long opcode exists)
             SEP #$20
             LDA #$01                                ; counter becomes 1 (next to send)
-            ; Y is NOT advanced here - .TxTransferLoop does INY INY at the start
-            ; to advance past the previous pair before loading the next one
+            ; Y is NOT advanced here - ..TransferLoop does INY INY at the start to advance past the previous pair before loading the next one
             DEX : DEX                               ; budget -= 2
-            BEQ .TxChunkDone
+            BEQ ..ChunkDone
             ; Fall through to transfer subsequent pairs
 
-        .TxTransferLoop:
+        ..TransferLoop:
             ; A = counter (8-bit), X = budget (16-bit), Y = source (16-bit)
-            ; Advance Y past previous pair's data
-            INY : BNE +
-            JSR .IncBank
-        +   INY : BNE +
-            JSR .IncBank
-        +
+            INY : BNE + : JSR .IncBank : +          ;) Advance Y past previous pair's data
+            INY : BNE + : JSR .IncBank : +          ;/
 
             ; Decrement block size by 2
-            PHA                                     ; save counter (8-bit -> 1 byte on stack)
+            PHA                                     ; save counter
             REP #$20
             LDA !RamAsyncSpcBlockSize
             SEC : SBC #$0002
             STA !RamAsyncSpcBlockSize
-            BEQ .TxEndBlock                         ; size == 0 -> even block end
-            CMP #$FFFF : BEQ .TxEndBlockOdd         ; size == -1 -> odd block end
+            BEQ ..EndBlock                          ; size == 0 -> even block end
+            CMP #$FFFF : BEQ ..EndBlockOdd          ; size == -1 -> odd block end
             SEP #$20
             PLA                                     ; restore counter
 
             ; Wait for SPC echo of counter at IO 2
             ; (SPC writes Y to $F6 after processing each pair; CPU reads $F6 from IO 2)
             ; IO 3 ($F7) stays $00 during transfer (set by SPC's mov $f7, #$00 at .transfer entry)
-        .TxWaitEcho:
-            CMP $002142 : BNE .TxWaitEcho           ; long addr: DB is source bank
+        -   CMP $002142 : BNE -
 
             ; Send next 2 data bytes
-            PHA                                     ; save counter (need 16-bit A for data load)
+            PHA                                     ; save counter
             REP #$20
-            LDA $0000,y : STA $002140               ; IO 0-1 = data pair (long addr)
+            LDA $0000,y : STA $002140               ; IO 0-1 = data pair
             SEP #$20
             PLA                                     ; restore counter
-            STA $002142                             ; IO 2 = counter (long addr; IO 3 stays 0 from first pair)
-
-            ; Advance counter by 2 (wraps at 256 via 8-bit arithmetic)
-            CLC : ADC #$02
-
+            STA $002142                             ; IO 2 = counter (IO 3 stays 0 from first pair)
+            CLC : ADC #$02                          ; Advance counter by 2 (wraps at 256 via 8-bit arithmetic)
             DEX : DEX                               ; budget -= 2
-            BNE .TxTransferLoop
-            ; Fall through when budget exhausted
+            BNE ..TransferLoop                      ; Fall through when budget exhausted
 
-        .TxChunkDone:
+        ..ChunkDone:
             ; Save state for next transfer call
             STA !RamAsyncSpcIndex                   ; save counter
             REP #$20
@@ -1834,41 +1715,28 @@ if !AsyncMusicUploadEnabled > 0
             PLB                                     ; restore original DB
             RTS
 
-        .TxEndBlock:                                ; A is 16-bit here, counter is on stack (8-bit push)
-            SEP #$20
-            PLA                                     ; restore counter
-            BRA .TxSendEnd
-
-        .TxEndBlockOdd:                             ; A is 16-bit here, counter is on stack
-            SEP #$20
-            PLA                                     ; restore counter
+        ..EndBlockOdd:                              ; A is 16-bit here, counter is on stack
             DEY                                     ; back up source by 1 byte (odd block had 1 extra advance)
-            ; Fall through to send end signal
-
-        .TxSendEnd:
+                                                    ; Fall through to EndBlock
+        ..EndBlock:                                 ; A is 16-bit here, counter is on stack
+            SEP #$20
+            PLA                                     ; restore counter
+                                                    ; Fall through to SendEnd
+        ..SendEnd:
             ; A = counter (8-bit). Block is finished.
             ; Wait for SPC echo of current counter (SPC processed last pair we sent)
-        .TxWaitFinalEcho:
-            CMP $002142 : BNE .TxWaitFinalEcho      ; long addr: DB is source bank
+        -   CMP $002142 : BNE -
 
             ; Send end-of-block signal:
-            ; IO 2 = counter - 1 (doesn't match any Y the SPC expects, so SPC falls to bbc0 check)
-            ; IO 3 = $01 (bit 0 set = end flag; SPC's bbc0 $f7 test sees it and exits transfer)
-            DEC A : STA $002142                     ; IO 2 = counter - 1 (long addr)
-            LDA #$01 : STA $002143                  ; IO 3 = end flag (long addr)
-
-            ; Save source pointer and bank
+            DEC A : STA $002142                     ; IO 2 = counter - 1 (doesn't match any Y the SPC expects, so SPC falls to bbc0 check)
+            LDA #$01 : STA $002143                  ; IO 3 = $01 (bit 0 set = end flag; SPC's bbc0 $f7 test sees it and exits transfer)
+            REP #$20                                ;\
+            TYA : STA !RamAsyncSpcDataY             ;) Save source pointer and bank
+            SEP #$20                                ;|
+            PHB : PLA : STA !RamAsyncSpcDataBank    ;/
+            LDA #$00 : STA !RamAsyncSpcIndex        ; Reset counter for next block
             REP #$20
-            TYA : STA !RamAsyncSpcDataY
-            SEP #$20
-            PHB : PLA : STA !RamAsyncSpcDataBank
-
-            ; Reset counter for next block
-            LDA #$00 : STA !RamAsyncSpcIndex
-
-            ; Transition to NextBlock to read next block header
-            REP #$20
-            LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
+            LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState ; Transition to NextBlock to read next block header
             PLB
             RTS
 
@@ -1877,12 +1745,10 @@ if !AsyncMusicUploadEnabled > 0
         ; SPC sees dest=$0000, writes $CC to $F6, then clears ports and returns to music engine.
         .StateEofWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BNE .EwNotReady
-
-            ; SPC acknowledged EOF. Transition to Complete.
-            LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState
-            JMP .StateComplete                      ; execute immediately
-        .EwNotReady:
+            LDA $2142 : CMP #$11CC : BNE ..NotReady
+            LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState ; SPC acknowledged EOF. Transition to Complete.
+            JMP .StateComplete                                  ; execute immediately
+        ..NotReady:
             RTS
 
         ; ---- State: Complete ----
@@ -1891,18 +1757,45 @@ if !AsyncMusicUploadEnabled > 0
             REP #$20
             LDA #$0000
             STA !RamUploadingToApuFlag
-            STA !RamAsyncSpcState                   ; state = idle (0)
+            STA !RamAsyncSpcState ; state = idle (0)
+            RTS
+
+        ; ---- State: StopWait (InitializeEarlyStartUpload only) ----
+        ; Entered from .InitializeEarlyStartUpload after writing $00 (stop music) to IO 0 and arming
+        ; !RamAsyncSpcStopWaitTarget = (!RamNmiCounter at entry) + !MusicStopWaitFrames.
+        ;
+        ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
+        ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
+        ; clobber ARAM with fast upload data. Vanilla achieves the same effect via two back-to-
+        ; back $808FC1 calls, each priming an 8-frame music queue timer.
+        ;
+        ; Comparison: signed 16-bit (current - target). If bit 15 is clear, we've reached or
+        ; passed the target. This tolerates 16-bit wraparound as long as the wait is < 32768
+        ; frames (!MusicStopWaitFrames range $0001..$7FFF; default $0008).
+        ;
+        ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
+        ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
+        .StateStopWait:
+            REP #$20
+            LDA !RamNmiCounter                      ; current 16-bit NMI counter
+            SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
+            BMI ..Waiting                           ; if current < target (bit 15 set): still waiting
+            ; Wait satisfied. Kick off the fast upload.
+            SEP #$20
+            LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
+            REP #$20
+            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+            RTS
+        ..Waiting:
             RTS
 
         ; ---- Helper: Increment source bank (Y wrapped to $8000) ----
         ; Same as vanilla $80:8107 and practice hack's cm_spc_inc_bank.
         ; Called when Y overflows past $FFFF. Sets Y=$8000, increments bank.
-        ; IMPORTANT: Called from both 8-bit and 16-bit A contexts (.StateNextBlock uses 16-bit,
-        ; .StateTransfer uses 8-bit). We must use 8-bit internally for the PHA/PLB/PLA sequence
-        ; because PLB always pulls exactly 1 byte regardless of the M flag.
+        ; Called from both 8-bit and 16-bit A contexts (.StateNextBlock uses 16-bit, .StateTransfer uses 8-bit).
+        ; We must use 8-bit internally for the PHA/PLB/PLA sequence because PLB always pulls exactly 1 byte regardless of the M flag.
         .IncBank:
-            PHP                                     ; save processor state (including M flag)
-            SEP #$20                                ; force 8-bit A
+            PHP : SEP #$20
             PHA
             LDA !RamAsyncSpcDataBank : INC : STA !RamAsyncSpcDataBank
             PHA : PLB                               ; DB = new bank (1-byte push, 1-byte pull - balanced)
@@ -1932,7 +1825,7 @@ if !AsyncMusicUploadEnabled > 0
             RTL                                     ; return N/Z flags
 
         ..SkipMusicQueue:
-            ; Upload in progress - skip the ENTIRE music queue handler.
+            ; Upload in progress - skip the music queue handler.
             ; Stack right now (top to bottom):
             ;   [3 bytes] return addr -> $808F11 (from JSL at $808F0D)
             ;   [1 byte]  P from the vanilla PHP at $808F0C (the caller's original P)
