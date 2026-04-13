@@ -116,6 +116,7 @@ math pri on
                                      ;     GET IT HERE: https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
                                      ;     Disable if you have conflicts, issues, or otherwise don't want the way the game loads music to be changed.
                                      ;     None of the other music-related options will take effect if this is 0.
+                                     ;     Note: If you disable this but still include total's SPC optimization patch in your hack, that will still work just fine.
 
     !ReportFreespaceAndRamUsage = 1  ; Set to 0 to stop this patch from printing it's freespace and RAM usage to the console when assembled.
 
