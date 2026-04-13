@@ -1,7 +1,5 @@
 lorom
 
-; BY DEFAULT, THIS PATCH REQUIERS TOTAL'S SPC TRANSFER OPTIMIZATION!!! READ MORE BELOW. https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
-
 warnings disable Wfeature_deprecated
 
 math round off
@@ -11,7 +9,7 @@ math pri on
 ;   By now, several of us have rewritten door transitions - this is my take on it.
 ;   This patch includes many customization options, allowing you to make them work exactly how you want.
 ;   V1.0 showcase video: https://youtu.be/rkpMoOeFj3Y
-;   V1.1 showcase video: https://youtu.be/3M7aj3aaaks
+;   V1.1 showcase video: TODO
 
 ; by Nodever2 November 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
@@ -21,15 +19,15 @@ math pri on
 ;  * P.JBoy  - Keeper of the commented Super Metroid bank logs, without which this patch would not have been possible. https://patrickjohnston.org/bank/index.html
 ;              Also maintains RAM map, SPC engin documentation which were also used.
 ;  * Tundain - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
-;  * NobodyNada and the SM Practice hack dev team - particularly the quickboot SPC code they wrote which was used as a reference: https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283
-;  * total   - His SM SPC engine optimization for faster uploads is used by this patch.
+;  * NobodyNada and the SM Practice hack dev team - particularly the quickboot SPC code they wrote which was used as a reference for !AsyncMusicUploadEnabled: https://github.com/tewtal/sm_practice_hack/blob/4d6358f022b5a0d092419dd06a3b60c2bd27927a/src/menu.asm#L283
+;  * total   - His SM SPC engine optimization for faster uploads is used by this patch when !AsyncMusicUploadEnabled is 1.
 
 ; Other patches you should use that were tested with this, that have no conflicts and work out of the box:
 ;  * Decompression Optimization by Kejardon, with bugfix from Maddo - Included in this patch
 ;     > This makes large rooms load faster.
 ;
 ;  * SPC Transfer Optimization by total - https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
-;     > THIS IS REQUIRED BY DEFAULT!!! This makes music load faster. See !AsyncMusicUploadEnabled option if you don't want to use this.
+;     > This makes music load faster. Required if !AsyncMusicUploadEnabled is 1.
 ;
 ;  * Full Door Cap PLM Rewrite by Nodever2 - https://metroidconstruction.com/resource.php?id=562
 ;     > This makes door caps a lot less annoying, you can't bonk on them as they're opening anymore alongside other improvements.
@@ -51,8 +49,8 @@ math pri on
 ;      > Can see flickering of door tubes when moving down an elevator room that has door tubes -> confirmed this is an issue in vanilla, so I'm leaving it for now.
 ; 2026-04-04 v1.1:
 ;   * VRAM transfers now occur over a longer period of time, resulting in a shorter fblank period each frame. This occurs during scrolling and does not slow down the total length of the transition.
-;   * SPC music data transfers now start as soon as the screen fades to black and happen in the background throughout the rest of the transition, instead of happening all at once after scrolling stops.
-;     This greatley reduces if not eliminates the hang time at the end of a door transition where there is a music transition.
+;   * If !AsyncMusicUploadEnabled = 1, SPC music data transfers now start as soon as the screen fades to black and happen in the background throughout the rest of the transition,
+;        instead of happening all at once after scrolling stops. This greatley reduces if not eliminates the hang time at the end of a door transition where there is a music transition.
 ;   * Added many options:
 ;      > PlaceSamusAlgorithm - default is now vanilla behavior. Thanks OmegaDragnet for the suggestion.
 ;      > SecondaryScrollDuration - can now granularly customize how long secondary scrolling takes. This replaces the option TransitionAnimation - this is just a more customizable version.
@@ -111,9 +109,11 @@ math pri on
                                      ;        8001-FFFE: Acts as algorithm 3, but ignores bit 8000h. All other bits are used as a hardcoded pixel offset from the edge of the screen.
                                      ;        FFFF: Acts as algorithm 2. Samus is placed at door cap, or at a default position if no door cap.
     
-    !AsyncMusicUploadEnabled    = 1  ; AsyncMusicUploadEnabled: If 0, none of the new music upload code changes will be assembled by this patch.
+    !AsyncMusicUploadEnabled    = 0  ; AsyncMusicUploadEnabled: If 1 (Recommended), music will load asynchronously throughout the door transition sequence instead of all at once at the very end.
+                                     ;     This basically eliminates the perceptible extra wait time at the end of door transitions that change music.
                                      ;     IF ENABLED, TOTAL'S SPC TRANSFER OPTIMIZATION PATCH IS REQUIRED TO ALSO HAVE INSTALLED IN YOUR HACK!!!
                                      ;     GET IT HERE: https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
+                                     ;     If 0, none of the new music upload code changes will be assembled by this patch.
                                      ;     Disable if you have conflicts, issues, or otherwise don't want the way the game loads music to be changed.
                                      ;     None of the other music-related options will take effect if this is 0.
                                      ;     Note: If you disable this but still include total's SPC optimization patch in your hack, that will still work just fine.
