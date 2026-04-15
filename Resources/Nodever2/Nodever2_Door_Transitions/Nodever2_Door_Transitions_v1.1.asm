@@ -9,7 +9,7 @@ math pri on
 ;   By now, several of us have rewritten door transitions - this is my take on it.
 ;   This patch includes many customization options, allowing you to make them work exactly how you want.
 ;   V1.0 showcase video: https://youtu.be/rkpMoOeFj3Y
-;   V1.1 showcase video: TODO
+;   V1.1 showcase video: https://youtu.be/0UICwDYmfWQ
 
 ; by Nodever2 November 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
@@ -141,6 +141,11 @@ math pri on
                                           ;     Only used when !EarlyMusicUpload = 1; otherwise vanilla code naturally has the 8 frame wait.
                                           ;     Range: $0001..$7FFF (signed 16-bit delta). $08 matches vanilla timing.
     !AsyncSpcBytesPerTransfer     = $0040 ; 64d bytes per transfer call
+    !AsyncSpcTimeoutFrames        = $0020 ; Frames to wait at each handshake state (StateInit/BlockWait/EofWait) before assuming the SPC is stuck and triggering recovery.
+                                          ;     fastspc handshakes complete in well under 1 frame in the healthy case; $20 (~0.5s at 60fps) gives a generous safety margin.
+                                          ;     Range: $0001..$7FFF (signed 16-bit delta).
+    !AsyncSpcMaxRetries             = $03 ; Max recovery attempts per upload before giving up. Each retry sends a recovery sequence to free the SPC from a stuck fastspc state, then re-requests fast upload mode.
+                                          ;     If all retries fail, the upload aborts and !RamUploadingToApuFlag stays set as a "stuck SPC" sentinel - InitializeEarlyStartUpload will run a recovery sequence on the next door transition.
 
     ; Don't touch. These constants are for the freespace usage report.
     !FreespaceAnywhereReportStart := !FreespaceAnywhere
@@ -230,12 +235,15 @@ math pri on
     !RamCameraYTableIndex                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamLayer2YDestination                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
     !RamHDoorTopBlockYPosition                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2
+    if !AsyncMusicUploadEnabled > 0
     !RamAsyncSpcState                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; State number (0=idle, else active state index x 2)
     !RamAsyncSpcDataY                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source pointer into bank
     !RamAsyncSpcDataBank                         := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current source bank (low byte used, stored as word for convenience)
     !RamAsyncSpcBlockSize                        := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Remaining bytes in current block
     !RamAsyncSpcIndex                            := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Current handshake counter byte (low byte used)
-    !RamAsyncSpcStopWaitTarget                   := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; InitializeEarlyStartUpload stop-wait: target value of !RamNmiCounter at which StateStopWait sends $FE
+    !RamAsyncSpcTimeoutTarget                    := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Generic frame-counter target. Used by StateStopWait for the post-stop-music delay AND by StateInit/BlockWait/EofWait for the handshake timeout.
+    !RamAsyncSpcRetryCount                       := !CurRamAddr : !CurRamAddr := !CurRamAddr+2 ; Recovery retry counter (low byte used). Reset at upload init, incremented in HandleTimeout.
+    endif
     !RamEnd                                      := !CurRamAddr
 
     ; note/todo: we can use 092b and 092d if we just stop the game from setting them
@@ -1417,18 +1425,18 @@ if !AsyncMusicUploadEnabled > 0
             LDA.l MusicPointers+1,x ;) $00 = [MusicDataPointers + [music data index]]
             STA $01                 ;/
 
-            ; Start async state machine
-            PHP
+            ; Start async state machine.
             REP #$30
             LDA $00    : STA !RamAsyncSpcDataY      ; save source pointer Y
             LDA #$FFFF : STA !RamUploadingToApuFlag ; Set uploading flag (prevents music queue handler and sound handler from touching APU ports)
+            STZ !RamAsyncSpcRetryCount              ; Fresh upload -> reset retry budget
             SEP #$20
             LDA $02  : STA !RamAsyncSpcDataBank     ; save source bank
             LDA #$FE : STA $002140                  ; Send $FE to APU IO 0 to request fast upload mode (total's protocol)
-            LDA #$81 : STA $01,s                    ; Skip call to vanilla APU upload by updating stack retrun address; return to $808F82
+            LDA #$81 : STA $01,s                    ; Skip call to vanilla APU upload by updating stack return address: $75 -> $81 so RTL lands at $808F82.
             REP #$20
+            JSR .SetTimeout                         ; set timeout for StateInit ($11AA wait)
             LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState ; Set initial state: wait for SPC to respond with $11AA on IO 2-3. NMI checks this, so do this last.
-            PLP            
             RTL
 
         ..VanillaApuUpload:
@@ -1475,16 +1483,32 @@ if !AsyncMusicUploadEnabled > 0
             REP #$20
             STZ !RamMusicTrackIndex
 
+            ; Auto-recovery from a stuck SPC left over from a previous upload that exhausted retries.
+            ; Sentinel: !RamAsyncSpcState == 0 (we just confirmed) AND !RamUploadingToApuFlag != 0
+            ;   means the previous upload's HandleTimeout gave up. The SPC may still be in fastspc's
+            ;   $BB-wait loop. Send the unstick sequence ($00,$00 -> IO 0-1 ; $BB -> IO 2) to free it:
+            ;   if SPC was in $BB-wait, fastspc reads addr=$0000, writes $11CC, treats as EOF, and
+            ;   returns to N-SPC main loop. If SPC was actually in main loop, $00 on IO 0 acts as
+            ;   "stop music" (harmless / desired since we're about to start new music anyway).
+            ;   The subsequent !MusicStopWaitFrames StopWait gives the SPC time to settle either way.
+            SEP #$20
+            LDA !RamUploadingToApuFlag : BEQ ..NotStuck
+            LDA #$00 : STA $002140                  ; IO 0 = $00
+            LDA #$00 : STA $002141                  ; IO 1 = $00 (forms addr=$0000 if fastspc reads it)
+            LDA #$BB : STA $002142                  ; IO 2 = $BB (frees fastspc from cmp $f6,#$bb wait)
+        ..NotStuck:
+
             ; Send "stop music" ($00) to IO 0 and arm the StopWait countdown.
             ; The SPC music engine's dispatch loop will see $00 on IO 0, interpret it as a music
             ; track index of 0, and kill the current song. We then wait !MusicStopWaitFrames frames
             ; (matching vanilla's $808FC1 8-frame delay) before sending $FE to request fast upload mode.
-            SEP #$20
             LDA #$00 : STA $002140                  ; IO 0 = $00 (stop music command)
             REP #$20
             LDA !RamNmiCounter
             CLC : ADC.w #!MusicStopWaitFrames       ; target = now + wait (16-bit wrap OK, compared signed in StateStopWait).
-            STA !RamAsyncSpcStopWaitTarget          ; save target
+            STA !RamAsyncSpcTimeoutTarget           ; reuse generic timeout target slot for StopWait countdown
+
+            STZ !RamAsyncSpcRetryCount              ; Fresh upload -> reset retry budget (also clears any lingering stuck-sentinel count)
 
             ; Set uploading flag (guards sound handler / music queue handler from APU port writes).
             ; Must be set BEFORE returning so that the sound handler, which runs later in the same
@@ -1564,9 +1588,21 @@ if !AsyncMusicUploadEnabled > 0
         ; stop-wait countdown). The SPC music engine periodically checks IO 0 for commands;
         ; when it sees $FE, total's command hook routes to the fast upload handler at ARAM
         ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
+        ;
+        ; Hang protection: if !AsyncSpcTimeoutFrames pass without seeing $11AA, jump to .HandleTimeout
+        ; for staged recovery. See .HandleTimeout for the recovery sequence and rationale.
         .StateInit:
             REP #$20
-            LDA $2142 : CMP #$11AA : BNE ..NotReady
+            LDA $2142 : CMP #$11AA : BEQ ..Ready
+            ; Not ready. Check timeout.
+            LDA !RamNmiCounter
+            SEC : SBC !RamAsyncSpcTimeoutTarget     ; signed 16-bit (current - target)
+            BMI ..NotReady                          ; bit 15 set -> still within timeout window
+            JMP .HandleTimeout
+        ..Ready:
+            ; Successful handshake. Reset retry budget for next waiting state.
+            SEP #$20 : STZ !RamAsyncSpcRetryCount
+            REP #$20
             LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
         ..NotReady:
             RTS
@@ -1606,6 +1642,7 @@ if !AsyncMusicUploadEnabled > 0
             SEP #$20                                ;) Reset handshake counter for transfer
             LDA #$00 : STA !RamAsyncSpcIndex        ;/
             REP #$20
+            JSR .SetTimeout                         ; set hang-timeout for BlockWait ($11CC wait)
             LDA #!AsyncSpcStateBlockWait : STA !RamAsyncSpcState
             PLB
         ..Return
@@ -1616,6 +1653,7 @@ if !AsyncMusicUploadEnabled > 0
             TYA : STA !RamAsyncSpcDataY
             LDA #$0000 : STA $002140                           ; Send dest=$0000 to IO 0-1 (signals EOF to SPC)
             LDA #$00BB : STA $002142                           ; Tell SPC: "address sent"
+            JSR .SetTimeout                                    ; set hang-timeout for EofWait ($11CC wait)
             LDA #!AsyncSpcStateEofWait : STA !RamAsyncSpcState ; Transition to EofWait (wait for SPC to acknowledge with $11CC)
             PLB
             RTS
@@ -1624,9 +1662,19 @@ if !AsyncMusicUploadEnabled > 0
         ; Wait for SPC to acknowledge block header with $11CC on IO 2-3.
         ; SPC reads dest from $F4-$F5, writes $CC to $F6. CPU sees $xxCC on IO 2-3.
         ; After this, SPC enters .transfer and waits for the first data counter on $F6.
+        ;
+        ; Hang protection: same pattern as StateInit. Timeout was set at end of StateNextBlock.
         .StateBlockWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BNE ..Waiting
+            LDA $2142 : CMP #$11CC : BEQ ..Ready
+            ; Not ready. Check timeout.
+            LDA !RamNmiCounter
+            SEC : SBC !RamAsyncSpcTimeoutTarget
+            BMI ..Waiting
+            JMP .HandleTimeout
+        ..Ready:
+            SEP #$20 : STZ !RamAsyncSpcRetryCount   ; reset retry budget for next waiting state
+            REP #$20
             LDA #!AsyncSpcStateTransfer : STA !RamAsyncSpcState
         ..Waiting:
             RTS
@@ -1744,9 +1792,19 @@ if !AsyncMusicUploadEnabled > 0
         ; ---- State: EofWait ----
         ; After sending EOF marker (dest=$0000 + $00BB), wait for SPC to acknowledge with $11CC.
         ; SPC sees dest=$0000, writes $CC to $F6, then clears ports and returns to music engine.
+        ;
+        ; Hang protection: same pattern as StateInit/BlockWait. Timeout was set at end of StateNextBlock EOF path.
         .StateEofWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BNE ..NotReady
+            LDA $2142 : CMP #$11CC : BEQ ..Ready
+            ; Not ready. Check timeout.
+            LDA !RamNmiCounter
+            SEC : SBC !RamAsyncSpcTimeoutTarget
+            BMI ..NotReady
+            JMP .HandleTimeout
+        ..Ready:
+            SEP #$20 : STZ !RamAsyncSpcRetryCount               ; reset retry budget (final wait state, but keep tidy)
+            REP #$20
             LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState ; SPC acknowledged EOF. Transition to Complete.
             JMP .StateComplete                                  ; execute immediately
         ..NotReady:
@@ -1762,8 +1820,8 @@ if !AsyncMusicUploadEnabled > 0
             RTS
 
         ; ---- State: StopWait (InitializeEarlyStartUpload only) ----
-        ; Entered from .InitializeEarlyStartUpload after writing $00 (stop music) to IO 0 and arming
-        ; !RamAsyncSpcStopWaitTarget = (!RamNmiCounter at entry) + !MusicStopWaitFrames.
+        ; Entered from .InitializeEarlyStartUpload after writing $00 (stop music) to IO 0 and setting
+        ; !RamAsyncSpcTimeoutTarget = (!RamNmiCounter at entry) + !MusicStopWaitFrames.
         ;
         ; Purpose: give the SPC music engine time to (a) read $00 from IO 0 via its dispatch
         ; loop, (b) key-off the sustaining DSP voices, and (c) let envelopes decay before we
@@ -1776,18 +1834,84 @@ if !AsyncMusicUploadEnabled > 0
         ;
         ; On completion: write $FE to IO 0 (fast upload request) and transition to .StateInit,
         ; which polls $11AA on IO 2-3 for the SPC's fast-upload acknowledgment.
+        ;
+        ; Note: StopWait does NOT need a hang-timeout itself. It's purely a frame-counter wait;
+        ; !RamNmiCounter monotonically advances via NMI, so progress is guaranteed.
         .StateStopWait:
             REP #$20
             LDA !RamNmiCounter                      ; current 16-bit NMI counter
-            SEC : SBC !RamAsyncSpcStopWaitTarget    ; A = current - target (16-bit signed)
+            SEC : SBC !RamAsyncSpcTimeoutTarget     ; A = current - target (16-bit signed)
             BMI ..Waiting                           ; if current < target (bit 15 set): still waiting
             ; Wait satisfied. Kick off the fast upload.
             SEP #$20
             LDA #$FE : STA $002140                  ; IO 0 = $FE (request total's fast upload mode)
             REP #$20
+            JSR .SetTimeout                         ; set hang-timeout for StateInit ($11AA wait)
             LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
             RTS
         ..Waiting:
+            RTS
+
+        ; ---- Helper: Set hang-timeout for current state ----
+        ; Sets !RamAsyncSpcTimeoutTarget = !RamNmiCounter + !AsyncSpcTimeoutFrames.
+        ; Called at every transition INTO a waiting state (StateInit, BlockWait, EofWait).
+        ; Caller must have A in 16-bit mode (M=0); does not preserve A.
+        .SetTimeout:
+            LDA !RamNmiCounter
+            CLC : ADC.w #!AsyncSpcTimeoutFrames
+            STA !RamAsyncSpcTimeoutTarget
+            RTS
+
+        ; ---- Helper: HandleTimeout ----
+        ; Reached via JMP (not JSR) from StateInit/BlockWait/EofWait when their respective handshake
+        ; values fail to appear within !AsyncSpcTimeoutFrames frames. Performs staged recovery:
+        ;
+        ;   1. Increment retry counter. If >= !AsyncSpcMaxRetries, give up (see ..GiveUp below).
+        ;   2. Send the unstick sequence: ($00 -> IO 0), ($00 -> IO 1), ($BB -> IO 2).
+        ;        - Case A: SPC was in N-SPC main loop. $00 on IO 0 = "stop music" command (harmless;
+        ;                  we're trying to upload new music anyway).
+        ;        - Case B: SPC was in fastspc's "cmp $f6,#$bb / bne -" wait. Now $F6=$BB satisfies it;
+        ;                  fastspc reads addr from $F4/$F5 = $00/$00 = $0000, treats as EOF, writes
+        ;                  $11CC, and returns to N-SPC main loop via jmp $173e.
+        ;        - Case C: SPC was mid-block-transfer. $00 to $F4 gets read as a data byte (corrupting
+        ;                  the in-flight block, which we were already abandoning). Block eventually
+        ;                  completes; SPC re-enters fastspc top.
+        ;   3. Send $FE to IO 0 to re-request fast upload mode. SPC, now in N-SPC main loop, sees $FE
+        ;      and re-enters fastspc, writing $11AA on IO 2-3.
+        ;   4. Reset the timeout and reset state to StateInit. The state machine resumes polling.
+        ;
+        ; ..GiveUp: if all retries exhausted, abort the upload but leave !RamUploadingToApuFlag set
+        ; as a "stuck SPC" sentinel. This:
+        ;   - Blocks the vanilla music queue handler ($808F0C) and sound handler ($828970) from
+        ;     writing to APU ports, preventing further corruption of a stuck SPC.
+        ;   - Signals to .InitializeEarlyStartUpload on the next door transition that recovery is
+        ;     needed before starting a new upload. (See the ..NotStuck branch in InitializeEarlyStartUpload.)
+        ; Result in the GiveUp case: music stays silent for one room. The next door transition's auto-recovery
+        ; should clear the sentinel and get a fresh retry budget.
+        ;
+        ; Called via JMP from inside Dispatch (which has 16-bit A, 16-bit X/Y, DB=code bank).
+        ; Returns via RTS to Dispatch's epilogue (PLB : PLY : PLX : RTS).
+        .HandleTimeout:
+            SEP #$20
+            LDA !RamAsyncSpcRetryCount : INC : STA !RamAsyncSpcRetryCount
+            CMP #!AsyncSpcMaxRetries : BCS ..GiveUp
+
+            ; Staged recovery sequence: unstick fastspc $BB-wait, then re-request fast upload.
+            LDA #$00 : STA $002140                  ; IO 0 = $00
+            LDA #$00 : STA $002141                  ; IO 1 = $00 (forms addr=$0000 if fastspc reads $F4/$F5)
+            LDA #$BB : STA $002142                  ; IO 2 = $BB (frees fastspc from cmp $f6,#$bb wait)
+            LDA #$FE : STA $002140                  ; IO 0 = $FE (re-request fast upload mode; latches over the prior $00)
+
+            REP #$20
+            JSR .SetTimeout                         ; re-set timeout for the new StateInit attempt
+            LDA #!AsyncSpcStateInit : STA !RamAsyncSpcState
+            RTS
+
+        ..GiveUp:
+            ; Exhausted retries. Abort upload, leave sentinel set for next-door auto-recovery.
+            REP #$20
+            STZ !RamAsyncSpcState                   ; back to idle
+            ; !RamUploadingToApuFlag intentionally NOT cleared - acts as "stuck SPC" sentinel.
             RTS
 
         ; ---- Helper: Increment source bank (Y wrapped to $8000) ----
