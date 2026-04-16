@@ -1589,22 +1589,15 @@ if !AsyncMusicUploadEnabled > 0
         ; when it sees $FE, total's command hook routes to the fast upload handler at ARAM
         ; $56E2, which writes $11 to $F7 and $AA to $F6 (= $11AA on IO 2-3).
         ;
-        ; Hang protection: if !AsyncSpcTimeoutFrames pass without seeing $11AA, jump to .HandleTimeout
-        ; for staged recovery. See .HandleTimeout for the recovery sequence and rationale.
+        ; Hang protection: .CheckTimeoutOrReturn checks timeout and either jumps to .HandleTimeout
+        ; (staged recovery) or RTSes if still within the timeout window.
         .StateInit:
             REP #$20
-            LDA $2142 : CMP #$11AA : BEQ ..Ready
-            ; Not ready. Check timeout.
-            LDA !RamNmiCounter
-            SEC : SBC !RamAsyncSpcTimeoutTarget     ; signed 16-bit (current - target)
-            BMI ..NotReady                          ; bit 15 set -> still within timeout window
-            JMP .HandleTimeout
-        ..Ready:
-            ; Successful handshake. Reset retry budget for next waiting state.
-            SEP #$20 : STZ !RamAsyncSpcRetryCount
-            REP #$20
+            LDA $2142 : CMP #$11AA : BEQ +
+            JMP .CheckTimeoutOrReturn
+        +   ; Successful handshake. Reset retry budget for next waiting state.
+            STZ !RamAsyncSpcRetryCount              ; 16-bit STZ (M=0 here) clears both bytes of the 16-bit slot
             LDA #!AsyncSpcStateNextBlock : STA !RamAsyncSpcState
-        ..NotReady:
             RTS
 
         ; ---- State: NextBlock ----
@@ -1666,17 +1659,10 @@ if !AsyncMusicUploadEnabled > 0
         ; Hang protection: same pattern as StateInit. Timeout was set at end of StateNextBlock.
         .StateBlockWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BEQ ..Ready
-            ; Not ready. Check timeout.
-            LDA !RamNmiCounter
-            SEC : SBC !RamAsyncSpcTimeoutTarget
-            BMI ..Waiting
-            JMP .HandleTimeout
-        ..Ready:
-            SEP #$20 : STZ !RamAsyncSpcRetryCount   ; reset retry budget for next waiting state
-            REP #$20
+            LDA $2142 : CMP #$11CC : BEQ +
+            JMP .CheckTimeoutOrReturn
+        +   STZ !RamAsyncSpcRetryCount              ; reset retry budget for next waiting state
             LDA #!AsyncSpcStateTransfer : STA !RamAsyncSpcState
-        ..Waiting:
             RTS
 
         ; ---- State: Transfer ----
@@ -1796,19 +1782,11 @@ if !AsyncMusicUploadEnabled > 0
         ; Hang protection: same pattern as StateInit/BlockWait. Timeout was set at end of StateNextBlock EOF path.
         .StateEofWait:
             REP #$20
-            LDA $2142 : CMP #$11CC : BEQ ..Ready
-            ; Not ready. Check timeout.
-            LDA !RamNmiCounter
-            SEC : SBC !RamAsyncSpcTimeoutTarget
-            BMI ..NotReady
-            JMP .HandleTimeout
-        ..Ready:
-            SEP #$20 : STZ !RamAsyncSpcRetryCount               ; reset retry budget (final wait state, but keep tidy)
-            REP #$20
+            LDA $2142 : CMP #$11CC : BEQ +
+            JMP .CheckTimeoutOrReturn
+        +   STZ !RamAsyncSpcRetryCount                          ; reset retry budget (final wait state, but keep tidy)
             LDA #!AsyncSpcStateComplete : STA !RamAsyncSpcState ; SPC acknowledged EOF. Transition to Complete.
             JMP .StateComplete                                  ; execute immediately
-        ..NotReady:
-            RTS
 
         ; ---- State: Complete ----
         ; Upload finished. Clear flags, set state to idle.
@@ -1862,23 +1840,52 @@ if !AsyncMusicUploadEnabled > 0
             STA !RamAsyncSpcTimeoutTarget
             RTS
 
+        ; ---- Helper: CheckTimeoutOrReturn ----
+        ; Called via JMP from a waiting state (StateInit/BlockWait/EofWait) when its expected
+        ; handshake value hasn't arrived yet. Two outcomes:
+        ;   - Timeout NOT expired: RTS (returns to Dispatch; we'll retry next frame).
+        ;   - Timeout expired:     JMP .HandleTimeout (staged recovery).
+        ; Caller must have A in 16-bit mode (M=0). Does not preserve A.
+        .CheckTimeoutOrReturn:
+            LDA !RamNmiCounter
+            SEC : SBC !RamAsyncSpcTimeoutTarget      ; signed 16-bit: current - target
+            BMI ..StillWaiting                       ; bit 15 set -> still within timeout window
+            JMP .HandleTimeout
+        ..StillWaiting:
+            RTS
+
         ; ---- Helper: HandleTimeout ----
-        ; Reached via JMP (not JSR) from StateInit/BlockWait/EofWait when their respective handshake
-        ; values fail to appear within !AsyncSpcTimeoutFrames frames. Performs staged recovery:
+        ; Reached via JMP (not JSR) from .CheckTimeoutOrReturn when the timeout window has expired
+        ; while a waiting state (StateInit/BlockWait/EofWait) was polling its handshake value.
+        ; Performs staged recovery:
         ;
         ;   1. Increment retry counter. If >= !AsyncSpcMaxRetries, give up (see ..GiveUp below).
         ;   2. Send the unstick sequence: ($00 -> IO 0), ($00 -> IO 1), ($BB -> IO 2).
-        ;        - Case A: SPC was in N-SPC main loop. $00 on IO 0 = "stop music" command (harmless;
-        ;                  we're trying to upload new music anyway).
-        ;        - Case B: SPC was in fastspc's "cmp $f6,#$bb / bne -" wait. Now $F6=$BB satisfies it;
-        ;                  fastspc reads addr from $F4/$F5 = $00/$00 = $0000, treats as EOF, writes
-        ;                  $11CC, and returns to N-SPC main loop via jmp $173e.
-        ;        - Case C: SPC was mid-block-transfer. $00 to $F4 gets read as a data byte (corrupting
-        ;                  the in-flight block, which we were already abandoning). Block eventually
-        ;                  completes; SPC re-enters fastspc top.
-        ;   3. Send $FE to IO 0 to re-request fast upload mode. SPC, now in N-SPC main loop, sees $FE
-        ;      and re-enters fastspc, writing $11AA on IO 2-3.
-        ;   4. Reset the timeout and reset state to StateInit. The state machine resumes polling.
+        ;      The SPC could be in any of three states; this sequence is safe or useful in each:
+        ;
+        ;        - SPC in N-SPC main loop (idle or between commands):
+        ;              N-SPC polls $F4 for commands. It reads $00 (= "stop music" command; harmless
+        ;              since we're about to upload new music anyway). $BB in $F6 is a parameter byte
+        ;              that no active command cares about. Recovery proceeds to step 3.
+        ;
+        ;        - SPC in fastspc's "cmp $f6,#$bb / bne -" wait (the MOST LIKELY hang state, since
+        ;          that's exactly what our handshake timeouts are waiting for):
+        ;              fastspc is polling $F6 only; it ignored the $00s to $F4/$F5. Once we write
+        ;              $BB to $F6, fastspc proceeds: reads addr from $F4/$F5 = $00/$00 = $0000,
+        ;              writes $11CC, and since dest=$0000 means "end of upload", returns to N-SPC
+        ;              main loop via jmp $173e. Now the SPC is in the main-loop state above.
+        ;
+        ;        - SPC mid-block-transfer (fastspc inside the data loop reading $F4 as data bytes):
+        ;              $00 to $F4 gets read as a data byte, corrupting the in-flight block (which
+        ;              we were already abandoning on timeout). The block eventually ends via its
+        ;              natural end-of-block signal; fastspc re-enters at top and reads $FE (step 3)
+        ;              from $F4. This case is rare at our timeout checkpoints - we only time out at
+        ;              handshake boundaries, not during the transfer loop itself.
+        ;
+        ;   3. Send $FE to IO 0 to re-request fast upload mode. Whenever the SPC next reads $F4 in
+        ;      N-SPC main loop, it sees $FE and re-enters fastspc, writing $11AA on IO 2-3.
+        ;   4. Re-arm the timeout via .SetTimeout and reset state to StateInit. The state machine
+        ;      resumes polling for $11AA.
         ;
         ; ..GiveUp: if all retries exhausted, abort the upload but leave !RamUploadingToApuFlag set
         ; as a "stuck SPC" sentinel. This:
