@@ -1861,7 +1861,7 @@ if !AsyncMusicUploadEnabled > 0
         ;
         ;   1. Increment retry counter. If >= !AsyncSpcMaxRetries, give up (see ..GiveUp below).
         ;   2. Send the unstick sequence: ($00 -> IO 0), ($00 -> IO 1), ($BB -> IO 2).
-        ;      The SPC could be in any of three states; this sequence is safe or useful in each:
+        ;      The SPC could be in two states that we can recover from:
         ;
         ;        - SPC in N-SPC main loop (idle or between commands):
         ;              N-SPC polls $F4 for commands. It reads $00 (= "stop music" command; harmless
@@ -1874,13 +1874,6 @@ if !AsyncMusicUploadEnabled > 0
         ;              $BB to $F6, fastspc proceeds: reads addr from $F4/$F5 = $00/$00 = $0000,
         ;              writes $11CC, and since dest=$0000 means "end of upload", returns to N-SPC
         ;              main loop via jmp $173e. Now the SPC is in the main-loop state above.
-        ;
-        ;        - SPC mid-block-transfer (fastspc inside the data loop reading $F4 as data bytes):
-        ;              $00 to $F4 gets read as a data byte, corrupting the in-flight block (which
-        ;              we were already abandoning on timeout). The block eventually ends via its
-        ;              natural end-of-block signal; fastspc re-enters at top and reads $FE (step 3)
-        ;              from $F4. This case is rare at our timeout checkpoints - we only time out at
-        ;              handshake boundaries, not during the transfer loop itself.
         ;
         ;   3. Send $FE to IO 0 to re-request fast upload mode. Whenever the SPC next reads $F4 in
         ;      N-SPC main loop, it sees $FE and re-enters fastspc, writing $11AA on IO 2-3.
