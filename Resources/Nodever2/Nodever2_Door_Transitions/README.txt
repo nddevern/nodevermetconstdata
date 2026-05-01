@@ -45,7 +45,7 @@ Nodever2's Door Transitions
  * SPC Transfer Optimization by total - This patch makes loading music faster. Get it here: https://patrickjohnston.org/ASM/ROM%20data/Super%20Metroid/Other's%20work/total%20SPC%20transfer%20optimisation.asm
  * Full Door Cap PLM Rewrite by Nodever2 - This makes door caps better, you can't bonk on them anymore and various other improvements. Get it here: https://metroidconstruction.com/resource.php?id=562
  * Patch showcase video for V1.0 of this door transition patch: https://youtu.be/rkpMoOeFj3Y
- * V1.1 showcase: https://youtu.be/3M7aj3aaaks
+ * V1.1 showcase: https://www.youtube.com/watch?v=0UICwDYmfWQ
 
 --- VERSION HISTORY: ---
 ; 2025-11-08 v1.0: Initial release.
@@ -71,3 +71,5 @@ Nodever2's Door Transitions
  * Nodever2 - Main developer - please let me know if you have any issues or need help :)
  * P.JBoy   - Keeper of the commented Super Metroid bank logs, without which this patch would not have been possible. https://patrickjohnston.org/bank/index.html
  * Tundain  - Gave me the idea of how we can tell whether to position the door DMA (a.k.a. black flickering) on the top or bottom of the screen
+
+ If you ever experience a softlock or crash, please make a save state of the game while it is softlocked and send it to me (Nodever2). Doesn't matter which emulator.

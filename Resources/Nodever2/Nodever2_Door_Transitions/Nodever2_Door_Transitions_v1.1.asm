@@ -9,11 +9,12 @@ math pri on
 ;   By now, several of us have rewritten door transitions - this is my take on it.
 ;   This patch includes many customization options, allowing you to make them work exactly how you want.
 ;   V1.0 showcase video: https://youtu.be/rkpMoOeFj3Y
-;   V1.1 showcase video: TODO
+;   V1.1 showcase video: https://www.youtube.com/watch?v=0UICwDYmfWQ
 
 ; by Nodever2 November 2025
 ; Works with Asar (written with metconst fork of asar 1.90pre), won't work with xkas
 ; Please give credit if you use this patch.
+; If you ever experience a softlock or crash, please make a save state of the game while it is softlocked and send it to me. Doesn't matter which emulator.
 
 ; This patch was also made possible by:
 ;  * P.JBoy  - Keeper of the commented Super Metroid bank logs, without which this patch would not have been possible. https://patrickjohnston.org/bank/index.html
