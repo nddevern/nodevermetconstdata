@@ -35,7 +35,7 @@ Nodever2's Door Transitions
     > This patch also uses a few RAM addresses that are normally unused in Super Metroid - you can customize which ones this patch uses in case there are conflicts with other patches.
   * ReportFreespaceAndRamUsage
     > The patch by default prints the RAM and freespace it uses to the console when assembling - set this to 0 to turn that off.
-  * ScreenFadeDelay, PrimaryScrollDuration, SecondaryScrollDuration, TwoPhaseTransition, PrimaryScrollCurve, SecondaryScrollCurve, PlaceSamusAlgorithm
+  * ScreenFadeDelay, PrimaryScrollDuration, SecondaryScrollDuration, TwoPhaseTransition, PrimaryScrollCurve, SecondaryScrollCurve, PlaceSamusAlgorithm, AddOptionToSkipScrolling, AddOptionToFadeLayer1
     > See patch for details.
   * BlackTile
     > Change this to change which tile gets rendered when the game would otherwise show out of bounds tiles. By default, renders a solid black tile.
@@ -66,6 +66,11 @@ Nodever2's Door Transitions
 ;   * Fixed scrolling bugs for BG1, BG2 that would occur when the screen is scrolling while OOB in the negative X direction.
 ;   * Updated SM's scrolling code to not render OOB tiles or screen wrapped tiles. Collision is unaffected.
 ;   * Moved RAM usage in hopes that the conflict with amoeba's scrolling sky is resolved.
+; 2026-05-03 v1.1.1:
+;  * Fixed critical issue where I used the same hijack point as SMART itself...
+;  * Added ability to specify per door transition to layer 1 colors or to skip the scrolling animation - see !AddOptionToSkipScrolling and !AddOptionToFadeLayer1
+;  * Fixed issues where !PlaceSamusAlgorithm advanced mode (4) did not assemble. Expanded this mode's feature set.
+;  * Added !PlaceSamusAlgorithm 5.
 
 --- CREDITS: ---
  * Nodever2 - Main developer - please let me know if you have any issues or need help :)
