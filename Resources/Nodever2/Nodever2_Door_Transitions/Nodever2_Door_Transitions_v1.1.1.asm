@@ -67,6 +67,7 @@ math pri on
 ; 2026-05-03 v1.1.1:
 ;  * Fixed critical issue where I used the same hijack point as SMART itself...
 ;  * Added ability to specify per door transition to layer 1 colors or to skip the scrolling animation - see !AddOptionToSkipScrolling and !AddOptionToFadeLayer1
+;    > If the door transition animation is skipped using either of these options or the vanilla CRE bitset option, the door transition animation in the background is played as fast as possible.
 ;  * Fixed issues where !PlaceSamusAlgorithm advanced mode (4) did not assemble. Expanded this mode's feature set.
 ;  * Added !PlaceSamusAlgorithm 5.
 
